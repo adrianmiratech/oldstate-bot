@@ -1,26 +1,32 @@
 /**
- * Bot de invitaciones de OLD STATE — proceso aparte, siempre encendido,
- * que mantiene una conexión de gateway con Discord para saber en tiempo
- * real quién entró al servidor de Discord y con qué invitación, y lo
- * reporta al panel web para el ranking de "Recompensas → Invitaciones".
+ * Bot de OLD STATE — proceso aparte, siempre encendido, que mantiene una
+ * conexión de gateway con Discord. Hace dos cosas que solo se pueden hacer
+ * con esa conexión permanente (no valen webhooks/REST puntuales):
  *
- * Por qué un proceso aparte y no una ruta más del panel (que vive en PHP,
- * sin proceso persistente): Discord solo notifica altas de miembros
- * (`guildMemberAdd`) por su gateway (WebSocket persistente) — no hay
- * webhook ni sondeo por REST que avise de eso en tiempo real. El resto del
- * bot (comprobar rol de whitelist, mandar avisos de streamers, leer
- * boosters...) sí es REST puro y vive dentro del propio backend PHP; esto
- * es la única pieza que necesita gateway, por eso corre aparte, en tu
- * propio VPS, sin depender del hosting compartido del panel.
+ * 1. Invitaciones: sabe en tiempo real quién entró al servidor de Discord y
+ *    con qué invitación (`guildMemberAdd`, sin webhook/sondeo posible), y lo
+ *    reporta al panel web para el ranking de "Recompensas → Invitaciones".
+ * 2. Verificación por mensaje: si alguien manda un "." en el canal
+ *    VERIFY_CHANNEL_ID, le da el rol de whitelist y reacciona al mensaje
+ *    con 👍 — un aceptar-normativa simplificado.
+ *
+ * El resto del bot (comprobar rol de whitelist desde el panel, avisos de
+ * streamers, leer boosters...) sí es REST puro y vive dentro del propio
+ * backend PHP; esto es la única pieza que necesita gateway, por eso corre
+ * aparte, en tu propio VPS, sin depender del hosting compartido del panel.
  *
  * Arranque: copia .env.example a .env, rellena los valores, y
  * `npm install && npm start`. En producción, mantenlo vivo con un gestor
  * de procesos (pm2, systemd, screen...).
  *
  * Requiere en el Developer Portal de Discord (Bot → Privileged Gateway
- * Intents): "Server Members Intent" activado — sin él, Discord no manda
- * `guildMemberAdd`. El bot también necesita el permiso "Manage Guild" en
- * el servidor para poder leer los usos de cada invitación.
+ * Intents): **"Server Members Intent"** (sin él, Discord no manda
+ * `guildMemberAdd`) y **"Message Content Intent"** (sin él, no se puede
+ * leer si un mensaje es exactamente "."). El bot también necesita, dentro
+ * del servidor: permiso "Manage Guild" (leer usos de invitación), "Manage
+ * Roles" con su propio rol posicionado POR ENCIMA del rol de whitelist en
+ * la jerarquía (si no, Discord rechaza la asignación), y permiso para
+ * añadir reacciones en el canal de verificación.
  */
 import "dotenv/config";
 import {
@@ -29,11 +35,14 @@ import {
   GatewayIntentBits,
   type GuildMember,
   type Invite,
+  type Message,
 } from "discord.js";
 
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
 const WEB_URL = process.env.PANEL_WEB_URL ?? "https://oldstate.sub-yorkhost.fr";
+const VERIFY_CHANNEL_ID = process.env.VERIFY_CHANNEL_ID ?? "1508924270447689873";
+const VERIFY_ROLE_ID = process.env.VERIFY_ROLE_ID ?? "1508918751918166291";
 
 function log(msg: string): void {
   console.log(`[invite-bot] ${msg}`);
@@ -49,6 +58,8 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildInvites,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
   ],
 });
 
@@ -123,6 +134,22 @@ client.on("guildMemberAdd", async (member: GuildMember) => {
 
   log(`${member.id} entró invitado por ${usedInvite.inviter.id} (código ${usedInvite.code})`);
   await recordJoin(usedInvite.inviter.id, member.id, usedInvite.code);
+});
+
+client.on("messageCreate", async (message: Message) => {
+  if (message.author.bot) return;
+  if (message.channelId !== VERIFY_CHANNEL_ID) return;
+  if (message.content.trim() !== ".") return;
+  if (!message.guild) return;
+
+  try {
+    const member = await message.guild.members.fetch(message.author.id);
+    await member.roles.add(VERIFY_ROLE_ID);
+    await message.react("👍");
+    log(`verificación: ${message.author.id} recibió el rol de whitelist en el canal ${VERIFY_CHANNEL_ID}`);
+  } catch (err) {
+    log(`no se pudo verificar a ${message.author.id}: ${(err as Error).message}`);
+  }
 });
 
 client.login(BOT_TOKEN);
