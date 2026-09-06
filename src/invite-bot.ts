@@ -43,6 +43,7 @@ const GUILD_ID = process.env.DISCORD_GUILD_ID;
 const WEB_URL = process.env.PANEL_WEB_URL ?? "https://oldstate.sub-yorkhost.fr";
 const VERIFY_CHANNEL_ID = process.env.VERIFY_CHANNEL_ID ?? "1508924270447689873";
 const VERIFY_ROLE_ID = process.env.VERIFY_ROLE_ID ?? "1508918751918166291";
+const NO_WHITELIST_ROLE_ID = process.env.NO_WHITELIST_ROLE_ID ?? "1508923770277199942";
 
 function log(msg: string): void {
   console.log(`[invite-bot] ${msg}`);
@@ -145,8 +146,11 @@ client.on("messageCreate", async (message: Message) => {
   try {
     const member = await message.guild.members.fetch(message.author.id);
     await member.roles.add(VERIFY_ROLE_ID);
+    if (member.roles.cache.has(NO_WHITELIST_ROLE_ID)) {
+      await member.roles.remove(NO_WHITELIST_ROLE_ID);
+    }
     await message.react("👍");
-    log(`verificación: ${message.author.id} recibió el rol de whitelist en el canal ${VERIFY_CHANNEL_ID}`);
+    log(`verificación: ${message.author.id} recibió el rol de whitelist (y se le quitó "No whitelist") en el canal ${VERIFY_CHANNEL_ID}`);
   } catch (err) {
     log(`no se pudo verificar a ${message.author.id}: ${(err as Error).message}`);
   }
