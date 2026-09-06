@@ -1,0 +1,22 @@
+{
+  "name": "oldstate-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bot de invitaciones de OLD STATE RP: conexion permanente al gateway de Discord para saber quien invito a quien, reportado al panel web (oldstate-panel).",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/invite-bot.ts"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.12",
+    "typescript": "^5",
+    "@types/node": "^20"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
