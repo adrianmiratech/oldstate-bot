@@ -22,6 +22,8 @@
  *    avisa por DM a WATCHDOG_DM_ID.
  * 7. Reportes de bugs: cada mensaje en BUG_REPORT_CHANNEL_ID crea un bug de
  *    verdad en /panel/bugs (reaccionando con 🐛 al mensaje original).
+ * 8. Comando /prioridad (solo staff): otorga o quita un nivel de cola
+ *    prioritaria a un usuario, dando/quitando el rol real de Discord.
  *
  * Arranque: copia .env.example a .env, rellena los valores, y
  * `npm install && npm start`. En producción, mantenlo vivo con un gestor
@@ -42,6 +44,10 @@ import {
   Collection,
   GatewayIntentBits,
   Partials,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  type ChatInputCommandInteraction,
   type GuildMember,
   type Invite,
   type Message,
@@ -59,6 +65,15 @@ const NO_WHITELIST_ROLE_ID = process.env.NO_WHITELIST_ROLE_ID ?? "15089237702771
 const WATCHED_BOT_ID = process.env.WATCHED_BOT_ID ?? "1522364759767515368"; // "Old State 2000"
 const WATCHDOG_DM_ID = process.env.WATCHDOG_DM_ID ?? "761217833451257876";
 const BUG_REPORT_CHANNEL_ID = process.env.BUG_REPORT_CHANNEL_ID ?? "1508918753977434234";
+
+// Roles reales de "Cola Prioritaria LVL 1/2/3" -- otorgados por el comando
+// /prioridad (los permisos del panel se leen de estos mismos roles, así
+// que conceder uno aquí ya da la prioridad de verdad, sin tocar la web).
+const PRIORITY_ROLE_IDS: Record<"1" | "2" | "3", string> = {
+  "1": "1543967621945491486",
+  "2": "1543967686105505862",
+  "3": "1543967775800688681",
+};
 
 // ----- Moderación: umbrales de spam/flood -----
 const SPAM_WINDOW_MS = 6000; // ventana de tiempo
@@ -160,8 +175,94 @@ async function recordJoin(inviterDiscordId: string, invitedDiscordId: string, in
   }
 }
 
+// ===== Comandos de barra (slash commands) =====
+
+const COMMANDS = [
+  new SlashCommandBuilder()
+    .setName("prioridad")
+    .setDescription("Otorga un nivel de cola prioritaria a un usuario")
+    .addUserOption((opt) => opt.setName("usuario").setDescription("Usuario a modificar").setRequired(true))
+    .addStringOption((opt) =>
+      opt
+        .setName("nivel")
+        .setDescription("Nivel de prioridad")
+        .setRequired(true)
+        .addChoices(
+          { name: "Nivel 1", value: "1" },
+          { name: "Nivel 2", value: "2" },
+          { name: "Nivel 3", value: "3" },
+          { name: "Quitar prioridad", value: "0" }
+        )
+    )
+    .toJSON(),
+];
+
+async function registerSlashCommands(): Promise<void> {
+  try {
+    const rest = new REST().setToken(BOT_TOKEN!);
+    const appId = client.application!.id;
+    await rest.put(Routes.applicationGuildCommands(appId, GUILD_ID!), { body: COMMANDS });
+    log("comandos de barra registrados");
+  } catch (err) {
+    log(`no se pudieron registrar los comandos de barra: ${(err as Error).message}`);
+  }
+}
+
+function isStaffMember(member: GuildMember): boolean {
+  return [...member.roles.cache.keys()].some((id) => STAFF_ROLE_IDS.has(id));
+}
+
+async function handlePrioridadCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  if (!interaction.guild || !interaction.member) return;
+  const invoker = interaction.member as GuildMember;
+  if (!isStaffMember(invoker)) {
+    await interaction.reply({ content: "No tienes permiso para usar este comando.", ephemeral: true });
+    return;
+  }
+
+  const targetUser = interaction.options.getUser("usuario", true);
+  const nivel = interaction.options.getString("nivel", true) as "0" | "1" | "2" | "3";
+
+  try {
+    const targetMember = await interaction.guild.members.fetch(targetUser.id);
+    for (const roleId of Object.values(PRIORITY_ROLE_IDS)) {
+      if (targetMember.roles.cache.has(roleId)) {
+        await targetMember.roles.remove(roleId);
+      }
+    }
+    if (nivel !== "0") {
+      await targetMember.roles.add(PRIORITY_ROLE_IDS[nivel]);
+    }
+
+    const label = nivel === "0" ? "sin prioridad" : `Nivel ${nivel}`;
+    await interaction.reply({
+      content: `${targetUser} ahora tiene: **${label}**.`,
+      ephemeral: false,
+    });
+
+    logEvent("bot.command_prioridad", {
+      actorDiscordId: invoker.id,
+      targetDiscordId: targetUser.id,
+      guildId: interaction.guild.id,
+      details: { nivel },
+      message: `${invoker.user.tag} usó /prioridad sobre ${targetUser.tag}: ${label}.`,
+    });
+  } catch (err) {
+    log(`fallo en /prioridad: ${(err as Error).message}`);
+    await interaction.reply({ content: "No se pudo completar la acción.", ephemeral: true });
+  }
+}
+
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName === "prioridad") {
+    await handlePrioridadCommand(interaction);
+  }
+});
+
 client.once("clientReady", async () => {
   log(`conectado como ${client.user?.tag}`);
+  await registerSlashCommands();
   await refreshInviteCache();
   log(`${inviteCache.size} invitaciones cacheadas`);
 });
