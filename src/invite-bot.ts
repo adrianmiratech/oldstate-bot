@@ -83,6 +83,7 @@ const NO_WHITELIST_ROLE_ID = process.env.NO_WHITELIST_ROLE_ID ?? "15089237702771
 const WATCHED_BOT_ID = process.env.WATCHED_BOT_ID ?? "1522364759767515368"; // "Old State 2000"
 const WATCHDOG_DM_ID = process.env.WATCHDOG_DM_ID ?? "761217833451257876";
 const BUG_REPORT_CHANNEL_ID = process.env.BUG_REPORT_CHANNEL_ID ?? "1508918753977434234";
+const SUGGESTION_CHANNEL_ID = process.env.SUGGESTION_CHANNEL_ID ?? "1522732946979553411";
 // Canal donde vive el embed de "quién tiene cada rol" (ver ROSTER_ROLE_NAMES
 // más abajo) -- puede estar en cualquiera de los dos servidores, solo hace
 // falta que el bot esté invitado ahí con permiso para enviar/editar
@@ -585,6 +586,37 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
+// ===== Mensajes programados: cada minuto se comprueba si toca enviar
+// alguno (pedido por el usuario) =====
+
+const SCHEDULED_MESSAGES_INTERVAL_MS = 60 * 1000;
+
+async function sendDueScheduledMessages(): Promise<void> {
+  try {
+    const res = await fetch(`${WEB_URL}/api/scheduled_messages_due.php`, {
+      headers: { "X-Bot-Token": BOT_TOKEN! },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return;
+    const data = (await res.json()) as { messages?: { id: string; channelId: string; content: string }[] };
+    for (const msg of data.messages ?? []) {
+      try {
+        const channel = await client.channels.fetch(msg.channelId);
+        if (channel && channel.isTextBased() && "send" in channel) {
+          await channel.send({ content: msg.content });
+          log(`mensaje programado ${msg.id} enviado al canal ${msg.channelId}`);
+        } else {
+          log(`mensaje programado ${msg.id}: el canal ${msg.channelId} no es de texto válido o el bot no tiene acceso.`);
+        }
+      } catch (err) {
+        log(`no se pudo enviar el mensaje programado ${msg.id}: ${(err as Error).message}`);
+      }
+    }
+  } catch (err) {
+    log(`no se pudo comprobar mensajes programados: ${(err as Error).message}`);
+  }
+}
+
 client.once("clientReady", async () => {
   log(`conectado como ${client.user?.tag}`);
   await registerSlashCommands();
@@ -597,6 +629,7 @@ client.once("clientReady", async () => {
     // evento de rol se pierde o el bot estuvo caído un momento.
     setInterval(updateRosterMessage, ROSTER_SYNC_INTERVAL_MS);
   }
+  setInterval(sendDueScheduledMessages, SCHEDULED_MESSAGES_INTERVAL_MS);
 });
 
 client.on("inviteCreate", (invite: Invite) => {
@@ -797,6 +830,34 @@ client.on("messageCreate", async (message: Message) => {
     }
   } catch (err) {
     log(`no se pudo crear el bug reportado por ${message.author.id}: ${(err as Error).message}`);
+  }
+});
+
+// ===== Sugerencias: cada mensaje en el canal se registra en la web =====
+
+client.on("messageCreate", async (message: Message) => {
+  if (message.author.bot) return;
+  if (message.channelId !== SUGGESTION_CHANNEL_ID) return;
+  if (!message.content.trim()) return;
+
+  try {
+    const res = await fetch(`${WEB_URL}/api/suggestion_from_discord.php`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
+      body: JSON.stringify({
+        discordId: message.author.id,
+        displayName: message.member?.displayName ?? message.author.username,
+        content: message.content,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) {
+      await message.react("💡");
+    } else {
+      log(`el panel rechazó la sugerencia de ${message.author.id} (HTTP ${res.status})`);
+    }
+  } catch (err) {
+    log(`no se pudo registrar la sugerencia de ${message.author.id}: ${(err as Error).message}`);
   }
 });
 
