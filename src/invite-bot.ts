@@ -791,6 +791,129 @@ client.on("messageCreate", async (message: Message) => {
   }
 });
 
+// ===== Ausencias de staff: cada mensaje en el canal se analiza para sacar
+// fecha de inicio, fecha de fin y motivo, y se registra en la web =====
+
+const ABSENCE_CHANNEL_ID = process.env.ABSENCE_CHANNEL_ID ?? "1381245444725932054";
+
+interface ParsedAbsence {
+  startDate: string; // "YYYY-MM-DD"
+  endDate: string;
+  reason: string;
+}
+
+function toIsoDate(day: number, month: number, year: number): string {
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+/**
+ * Heurística de texto libre en español: busca las dos primeras fechas
+ * "dd/mm" o "dd/mm/aaaa" (separador /, - o .) del mensaje como inicio y fin,
+ * y el motivo tras "motivo:"/"razón:" o, si no hay esa palabra clave, el
+ * resto del texto quitando las fechas y las palabras de enlace. Devuelve
+ * `null` si no encuentra al menos dos fechas -- ese caso se avisa al autor
+ * en vez de registrar algo adivinado a medias.
+ */
+function parseAbsenceMessage(rawText: string): ParsedAbsence | null {
+  const text = rawText.trim();
+  const dateRegex = /\b(\d{1,2})[\/\-.](\d{1,2})(?:[\/\-.](\d{2,4}))?\b/g;
+  const matches = [...text.matchAll(dateRegex)];
+  if (matches.length < 2) return null;
+
+  const currentYear = new Date().getFullYear();
+  const resolveYear = (raw: string | undefined): number => {
+    if (!raw) return currentYear;
+    const y = parseInt(raw, 10);
+    return y < 100 ? 2000 + y : y;
+  };
+
+  const [d1, m1, y1raw] = matches[0].slice(1);
+  const [d2, m2, y2raw] = matches[1].slice(1);
+  const day1 = parseInt(d1, 10);
+  const month1 = parseInt(m1, 10);
+  const day2 = parseInt(d2, 10);
+  const month2 = parseInt(m2, 10);
+  if (month1 < 1 || month1 > 12 || month2 < 1 || month2 > 12 || day1 < 1 || day1 > 31 || day2 < 1 || day2 > 31) {
+    return null;
+  }
+
+  const year1 = resolveYear(y1raw);
+  let year2 = resolveYear(y2raw);
+  const startDate = toIsoDate(day1, month1, year1);
+  let endDate = toIsoDate(day2, month2, year2);
+
+  // Si ninguna de las dos fechas trae año y la de fin queda antes que la de
+  // inicio, asumimos que la ausencia cruza el fin de año (ej. "del 28/12 al
+  // 03/01").
+  if (!y1raw && !y2raw && endDate < startDate) {
+    year2 += 1;
+    endDate = toIsoDate(day2, month2, year2);
+  }
+
+  let reason = "";
+  const reasonMatch = text.match(/(?:motivo|raz[oó]n)\s*:\s*(.+)/i);
+  if (reasonMatch) {
+    reason = reasonMatch[1].trim();
+  } else {
+    reason = text
+      .replace(dateRegex, " ")
+      .replace(/\b(del|al|desde|hasta|entre|y|de|el|la)\b/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  if (!reason) reason = "Sin motivo especificado";
+
+  return { startDate, endDate, reason };
+}
+
+client.on("messageCreate", async (message: Message) => {
+  if (message.author.bot) return;
+  if (message.channelId !== ABSENCE_CHANNEL_ID) return;
+  if (!message.content.trim()) return;
+
+  const parsed = parseAbsenceMessage(message.content);
+  if (!parsed) {
+    try {
+      await message.react("❌");
+      await message.reply(
+        "No pude detectar las fechas de tu ausencia. Usa un formato como:\n`Del 10/09 al 20/09 - Motivo: viaje familiar`"
+      );
+    } catch (err) {
+      log(`no se pudo avisar de ausencia mal formateada (${message.author.id}): ${(err as Error).message}`);
+    }
+    return;
+  }
+
+  try {
+    const res = await fetch(`${WEB_URL}/api/discord_absence_record.php`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
+      body: JSON.stringify({
+        discordId: message.author.id,
+        discordUsername: message.member?.displayName ?? message.author.username,
+        startDate: parsed.startDate,
+        endDate: parsed.endDate,
+        reason: parsed.reason,
+        messageId: message.id,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) {
+      await message.react("✅");
+    } else {
+      log(`el panel rechazó la ausencia de ${message.author.id} (HTTP ${res.status})`);
+      await message.react("⚠️");
+    }
+  } catch (err) {
+    log(`no se pudo registrar la ausencia de ${message.author.id}: ${(err as Error).message}`);
+    try {
+      await message.react("⚠️");
+    } catch {
+      // nada más que hacer si ni siquiera se puede reaccionar
+    }
+  }
+});
+
 // ===== Moderación automática: spam / flood =====
 
 // clave "canal:usuario" -> timestamps de sus últimos mensajes en ese canal
