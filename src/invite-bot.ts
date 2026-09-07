@@ -392,16 +392,25 @@ async function updateRosterMessage(): Promise<void> {
       try {
         const existing = await channel.messages.fetch(existingId);
         await existing.edit({ embeds: [embed] });
-        return;
-      } catch {
-        log(`el mensaje del roster (${existingId}) ya no existe -- se crea uno nuevo.`);
+      } catch (err) {
+        // Pedido explícito del usuario tras sufrir duplicados: a partir de
+        // ahora el roster NUNCA vuelve a mandar un mensaje nuevo por su
+        // cuenta si el guardado deja de servir -- solo se avisa en el log
+        // para revisarlo a mano (recrearlo es una acción manual, ver
+        // ROSTER_STATE_KEY en bot_state.php).
+        log(`el mensaje guardado del roster (${existingId}) ya no se puede editar (${(err as Error).message}) -- no se crea uno nuevo automáticamente, hace falta revisarlo a mano.`);
       }
+      return;
     }
 
+    // Solo se llega aquí si nunca ha existido ningún mensaje de roster
+    // (primer arranque de verdad, bot_state vacío de forma confirmada) --
+    // a partir de aquí, cualquier fallo futuro cae en la rama de arriba y
+    // nunca vuelve a mandar uno nuevo por su cuenta.
     const sent = await channel.send({ embeds: [embed] });
     const saved = await setBotState(ROSTER_STATE_KEY, sent.id);
     if (!saved) {
-      log(`aviso: el mensaje del roster ${sent.id} se envió pero no se pudo guardar su ID -- si esto persiste, el próximo ciclo podría duplicarlo.`);
+      log(`aviso: el primer mensaje del roster ${sent.id} se envió pero no se pudo guardar su ID -- revisa bot_state.roster_message_id a mano para que no se duplique en el futuro.`);
     }
   } catch (err) {
     log(`no se pudo actualizar el roster: ${(err as Error).message}`);
