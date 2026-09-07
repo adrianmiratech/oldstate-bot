@@ -20,6 +20,8 @@
  * 6. Vigilante de otro bot: comprueba cada 5 min si WATCHED_BOT_ID ("Old
  *    State 2000") está desconectado -- si lo detecta, lo deja registrado y
  *    avisa por DM a WATCHDOG_DM_ID.
+ * 7. Reportes de bugs: cada mensaje en BUG_REPORT_CHANNEL_ID crea un bug de
+ *    verdad en /panel/bugs (reaccionando con 🐛 al mensaje original).
  *
  * Arranque: copia .env.example a .env, rellena los valores, y
  * `npm install && npm start`. En producción, mantenlo vivo con un gestor
@@ -56,6 +58,7 @@ const VERIFY_ROLE_ID = process.env.VERIFY_ROLE_ID ?? "1508918751918166291";
 const NO_WHITELIST_ROLE_ID = process.env.NO_WHITELIST_ROLE_ID ?? "1508923770277199942";
 const WATCHED_BOT_ID = process.env.WATCHED_BOT_ID ?? "1522364759767515368"; // "Old State 2000"
 const WATCHDOG_DM_ID = process.env.WATCHDOG_DM_ID ?? "761217833451257876";
+const BUG_REPORT_CHANNEL_ID = process.env.BUG_REPORT_CHANNEL_ID ?? "1508918753977434234";
 
 // ----- Moderación: umbrales de spam/flood -----
 const SPAM_WINDOW_MS = 6000; // ventana de tiempo
@@ -305,6 +308,34 @@ client.on("messageCreate", async (message: Message) => {
     log(`verificación: ${message.author.id} recibió el rol de whitelist (y se le quitó "No whitelist") en el canal ${VERIFY_CHANNEL_ID}`);
   } catch (err) {
     log(`no se pudo verificar a ${message.author.id}: ${(err as Error).message}`);
+  }
+});
+
+// ===== Reportes de bugs: cada mensaje en el canal crea un bug en la web =====
+
+client.on("messageCreate", async (message: Message) => {
+  if (message.author.bot) return;
+  if (message.channelId !== BUG_REPORT_CHANNEL_ID) return;
+  if (!message.content.trim()) return;
+
+  try {
+    const res = await fetch(`${WEB_URL}/api/bug_report_from_discord.php`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
+      body: JSON.stringify({
+        discordId: message.author.id,
+        displayName: message.member?.displayName ?? message.author.username,
+        content: message.content,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) {
+      await message.react("🐛");
+    } else {
+      log(`el panel rechazó el bug reportado por ${message.author.id} (HTTP ${res.status})`);
+    }
+  } catch (err) {
+    log(`no se pudo crear el bug reportado por ${message.author.id}: ${(err as Error).message}`);
   }
 });
 
