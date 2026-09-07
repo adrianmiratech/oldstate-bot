@@ -15,16 +15,23 @@
  *    del mismo usuario en poco tiempo), borra esos mensajes, avisa al
  *    usuario por DM de que se ha registrado la infracción, y lo deja
  *    registrado como suceso de moderación.
+ * 5. Anti-@everyone: si alguien sin rol de staff menciona a @everyone/@here,
+ *    se borra el mensaje, se avisa por DM y queda registrado.
+ * 6. Vigilante de otro bot: comprueba cada 5 min si WATCHED_BOT_ID ("Old
+ *    State 2000") está desconectado -- si lo detecta, lo deja registrado y
+ *    avisa por DM a WATCHDOG_DM_ID.
  *
  * Arranque: copia .env.example a .env, rellena los valores, y
  * `npm install && npm start`. En producción, mantenlo vivo con un gestor
  * de procesos (pm2, systemd, screen...).
  *
  * Requiere en el Developer Portal de Discord (Bot → Privileged Gateway
- * Intents): **"Server Members Intent"** y **"Message Content Intent"**.
+ * Intents): **"Server Members Intent"**, **"Message Content Intent"** y
+ * **"Presence Intent"** (esta última nueva, necesaria para el vigilante del
+ * otro bot -- actívala en el Developer Portal o el bot no arrancará).
  * Permisos dentro del servidor: "Manage Guild" (invitaciones), "Manage
  * Roles" (con el rol del bot POR ENCIMA del rol de whitelist), "Manage
- * Messages" (borrar spam) y "Add Reactions".
+ * Messages" (borrar spam/menciones) y "Add Reactions".
  */
 import "dotenv/config";
 import {
@@ -47,10 +54,27 @@ const WEB_URL = process.env.PANEL_WEB_URL ?? "https://oldstate.sub-yorkhost.fr";
 const VERIFY_CHANNEL_ID = process.env.VERIFY_CHANNEL_ID ?? "1508924270447689873";
 const VERIFY_ROLE_ID = process.env.VERIFY_ROLE_ID ?? "1508918751918166291";
 const NO_WHITELIST_ROLE_ID = process.env.NO_WHITELIST_ROLE_ID ?? "1508923770277199942";
+const WATCHED_BOT_ID = process.env.WATCHED_BOT_ID ?? "1522364759767515368"; // "Old State 2000"
+const WATCHDOG_DM_ID = process.env.WATCHDOG_DM_ID ?? "761217833451257876";
 
 // ----- Moderación: umbrales de spam/flood -----
 const SPAM_WINDOW_MS = 6000; // ventana de tiempo
 const SPAM_MESSAGE_THRESHOLD = 5; // mensajes seguidos en esa ventana = flood
+const WATCHDOG_INTERVAL_MS = 5 * 60 * 1000; // cada cuanto se comprueba el otro bot
+
+// Escalera de staff real (Helper LVL 1 hacia arriba) -- quien tenga uno de
+// estos roles esta "autorizado" para mencionar a @everyone/@here.
+const STAFF_ROLE_IDS = new Set([
+  "1508918751960240210", // Helper LVL 1
+  "1508918751960240211", // Helper LVL 2
+  "1508926280173879296", // Helper LVL 3
+  "1508918751960240212", // Moderador
+  "1508918751960240213", // Administrador
+  "1525596060775350464", // Jefe de Staff
+  "1508918751960240215", // Direccion
+  "1525672932179837039", // "*"
+  "1508918751960240216", // CEO
+]);
 
 function log(msg: string): void {
   console.log(`[oldstate-bot] ${msg}`);
@@ -70,6 +94,7 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildPresences,
   ],
   partials: [Partials.Message, Partials.Channel, Partials.GuildMember],
 });
@@ -342,6 +367,85 @@ client.on("messageCreate", async (message: Message) => {
     details: { messageCount: timestamps.length, windowMs: SPAM_WINDOW_MS },
     message: `Flood detectado de ${authorTag} en <#${message.channelId}>: mensajes borrados y aviso enviado por DM.`,
   });
+});
+
+// ===== Anti-@everyone de usuarios no autorizados =====
+
+client.on("messageCreate", async (message: Message) => {
+  if (message.author.bot) return;
+  if (!message.guild || message.guild.id !== GUILD_ID) return;
+  if (!message.mentions.everyone) return;
+
+  const memberRoles = message.member?.roles.cache;
+  const isStaff = memberRoles ? [...memberRoles.keys()].some((id) => STAFF_ROLE_IDS.has(id)) : false;
+  if (isStaff) return;
+
+  try {
+    await message.delete();
+  } catch (err) {
+    log(`no se pudo borrar la mención de @everyone de ${message.author.id}: ${(err as Error).message}`);
+  }
+
+  try {
+    const dm = await message.author.createDM();
+    await dm.send(
+      "Se ha registrado una mención no autorizada a @everyone/@here en tu cuenta en OLD STATE. " +
+      "Tu mensaje ha sido borrado."
+    );
+  } catch (err) {
+    log(`no se pudo avisar por DM a ${message.author.id}: ${(err as Error).message}`);
+  }
+
+  logEvent("moderation.unauthorized_mention", {
+    actorDiscordId: message.author.id,
+    channelId: message.channelId,
+    guildId: message.guild.id,
+    message: `${message.author.tag} intentó mencionar a @everyone/@here sin autorización en <#${message.channelId}>.`,
+  });
+});
+
+// ===== Vigilante de otro bot (ej. "Old State 2000") =====
+
+let watchedBotOnline = true;
+
+async function checkWatchedBot(): Promise<void> {
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID!);
+    const member = await guild.members.fetch({ user: WATCHED_BOT_ID, force: true });
+    const status = member.presence?.status ?? "offline";
+    const isOnline = status !== "offline";
+
+    if (!isOnline && watchedBotOnline) {
+      logEvent("bot.watchdog_offline", {
+        targetDiscordId: WATCHED_BOT_ID,
+        guildId: GUILD_ID,
+        message: `El bot "Old State 2000" (${WATCHED_BOT_ID}) ha sido detectado como desconectado.`,
+      });
+      try {
+        const owner = await client.users.fetch(WATCHDOG_DM_ID);
+        const dm = await owner.createDM();
+        await dm.send(
+          "⚠️ El bot **Old State 2000** ha sido detectado como desconectado. Revísalo para su corrección."
+        );
+      } catch (err) {
+        log(`no se pudo avisar por DM al owner del vigilante: ${(err as Error).message}`);
+      }
+    } else if (isOnline && !watchedBotOnline) {
+      logEvent("bot.watchdog_online", {
+        targetDiscordId: WATCHED_BOT_ID,
+        guildId: GUILD_ID,
+        message: `El bot "Old State 2000" (${WATCHED_BOT_ID}) ha vuelto a conectarse.`,
+      });
+    }
+    watchedBotOnline = isOnline;
+  } catch (err) {
+    log(`no se pudo comprobar el estado del bot vigilado: ${(err as Error).message}`);
+  }
+}
+
+client.once("clientReady", () => {
+  setTimeout(checkWatchedBot, 10000);
+  setInterval(checkWatchedBot, WATCHDOG_INTERVAL_MS);
 });
 
 client.login(BOT_TOKEN);
