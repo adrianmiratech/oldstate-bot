@@ -24,6 +24,18 @@
  *    verdad en /panel/bugs (reaccionando con 🐛 al mensaje original).
  * 8. Comando /prioridad (solo staff): otorga o quita un nivel de cola
  *    prioritaria a un usuario, dando/quitando el rol real de Discord.
+ * 9. Roster de staff en vivo + sync entre dos servidores: GUILD_ID y
+ *    SECOND_GUILD_ID tienen los mismos roles de staff/encargados por
+ *    nombre (IDs distintos en cada uno). Si alguien tiene uno de esos
+ *    roles en un servidor pero no en el otro, se le añade el que le falta
+ *    automáticamente; y se mantiene editado un único embed en
+ *    ROSTER_CHANNEL_ID con quién tiene cada rol ahora mismo (unión de los
+ *    dos servidores). Se actualiza al momento con cada cambio de rol/salida
+ *    en cualquiera de los dos servidores, y además cada 5 minutos como
+ *    refresco de seguridad. El ID del mensaje se guarda en el panel
+ *    (bot_state.php) para sobrevivir a un reinicio del bot sin duplicarlo.
+ *    El bot necesita estar invitado a AMBOS servidores para esto, con su
+ *    rol por encima de todos los roles de ROSTER_ROLE_NAMES en los dos.
  *
  * Arranque: copia .env.example a .env, rellena los valores, y
  * `npm install && npm start`. En producción, mantenlo vivo con un gestor
@@ -34,8 +46,9 @@
  * **"Presence Intent"** (esta última nueva, necesaria para el vigilante del
  * otro bot -- actívala en el Developer Portal o el bot no arrancará).
  * Permisos dentro del servidor: "Manage Guild" (invitaciones), "Manage
- * Roles" (con el rol del bot POR ENCIMA del rol de whitelist), "Manage
- * Messages" (borrar spam/menciones) y "Add Reactions".
+ * Roles" (con el rol del bot POR ENCIMA del rol de whitelist, y por encima
+ * de todos los roles del roster en los dos servidores), "Manage Messages"
+ * (borrar spam/menciones) y "Add Reactions".
  */
 import "dotenv/config";
 import {
@@ -70,6 +83,16 @@ const NO_WHITELIST_ROLE_ID = process.env.NO_WHITELIST_ROLE_ID ?? "15089237702771
 const WATCHED_BOT_ID = process.env.WATCHED_BOT_ID ?? "1522364759767515368"; // "Old State 2000"
 const WATCHDOG_DM_ID = process.env.WATCHDOG_DM_ID ?? "761217833451257876";
 const BUG_REPORT_CHANNEL_ID = process.env.BUG_REPORT_CHANNEL_ID ?? "1508918753977434234";
+// Canal donde vive el embed de "quién tiene cada rol" (ver ROSTER_ROLE_NAMES
+// más abajo) -- puede estar en cualquiera de los dos servidores, solo hace
+// falta que el bot esté invitado ahí con permiso para enviar/editar
+// mensajes en ese canal. Sin configurar, la función no hace nada.
+const ROSTER_CHANNEL_ID = process.env.ROSTER_CHANNEL_ID ?? "1511363696964800563";
+// Segundo servidor de Discord a comparar con GUILD_ID para el roster y la
+// sincronización de roles de staff -- pedido por el usuario: si alguien
+// tiene un rol de staff en uno de los dos servidores pero no en el otro,
+// se le añade el que le falte automáticamente.
+const SECOND_GUILD_ID = process.env.SECOND_GUILD_ID ?? "1381245443505393705";
 
 // Roles reales de "Cola Prioritaria LVL 1/2/3" -- otorgados por el comando
 // /prioridad (los permisos del panel se leen de estos mismos roles, así
@@ -101,6 +124,209 @@ const STAFF_ROLE_IDS = new Set([
 
 function log(msg: string): void {
   console.log(`[oldstate-bot] ${msg}`);
+}
+
+// ===== Roster en vivo + sincronización de roles de staff entre servidores =====
+//
+// Pedido por el usuario a partir de un mensaje que mandaba a mano y quedaba
+// desactualizado. Dos servidores distintos (GUILD_ID y SECOND_GUILD_ID)
+// tienen los mismos puestos de staff/encargados pero, para varios, con un
+// NOMBRE DE ROL DISTINTO en cada servidor -- por eso cada entrada lleva el
+// nombre exacto en cada uno (comprobado a mano contra los roles reales de
+// los dos servidores, confirmado por el usuario). `nameB: null` = ese
+// puesto no existe en el servidor B, así que no se sincroniza -- solo se
+// muestra lo que haya en A. El orden de esta lista es el orden en que
+// aparecen las líneas del embed.
+interface RosterRoleDef {
+  label: string;
+  nameA: string;
+  nameB: string | null;
+}
+
+const ROSTER_ROLES: RosterRoleDef[] = [
+  { label: "CEO", nameA: "CEO", nameB: "CEO" },
+  { label: "*", nameA: "*", nameB: "*" },
+  { label: "Direccion", nameA: "Direccion", nameB: "Direccion" },
+  { label: "Jefe de Staff", nameA: "Jefe de Staff", nameB: "Jefe de Staff" },
+  { label: "Administrador", nameA: "Administrador", nameB: "Administrador" },
+  { label: "Moderador", nameA: "Moderador", nameB: "Moderador" },
+  { label: "Helper LVL 3", nameA: "Helper LVL 3", nameB: "Helper LVL 3" },
+  { label: "Helper LVL 2", nameA: "Helper LVL 2", nameB: "Helper LVL 2" },
+  { label: "Helper LVL 1", nameA: "Helper LVL 1", nameB: "Helper LVL 1" },
+  { label: "Developer", nameA: "Developer", nameB: "Equipo developer" },
+  { label: "Encargado/a negocios", nameA: "Encargado/a negocios", nameB: "Encargado Comercios" },
+  { label: "Encargado/a ilícitos", nameA: "Encargado/a ilícitos", nameB: "Encargado Ilicitos" },
+  { label: "Encargado/a marketing", nameA: "Encargado/a marketing", nameB: "Encargado Marketing" },
+  { label: "Encargado/a streamers", nameA: "Encargado/a streamers", nameB: "Encargado Streamers" },
+  { label: "Encargado/a entrevistadores", nameA: "Encargado/a entrevistadores", nameB: "Encargado entrevistador" },
+  { label: "Encargado/a economía", nameA: "Encargado/a economía", nameB: "Encargado Economia" },
+  { label: "Encargado SAPD", nameA: "Encargado SAPD", nameB: "Encargado SAPD" },
+  { label: "Encargado DOJ", nameA: "Encargado DOJ", nameB: null },
+  { label: "Encargado SAED", nameA: "Encargado SAED", nameB: "Encargado SAED" },
+];
+// Todos los nombres de rol que intervienen en el roster, en CUALQUIERA de
+// los dos servidores -- usado solo para detectar rápido si un cambio de
+// rol cualquiera (de cualquier persona, en cualquiera de los dos
+// servidores) afecta al roster y hace falta recalcularlo.
+const ROSTER_ROLE_NAME_SET = new Set(
+  ROSTER_ROLES.flatMap((r) => [r.nameA, r.nameB]).filter((n): n is string => n !== null)
+);
+const ROSTER_STATE_KEY = "roster_message_id";
+const ROSTER_SYNC_INTERVAL_MS = 5 * 60 * 1000; // refresco periódico de seguridad, además del en vivo
+
+function isRosterGuild(guildId: string): boolean {
+  return guildId === GUILD_ID || guildId === SECOND_GUILD_ID;
+}
+
+async function getBotState(key: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${WEB_URL}/api/bot_state.php?key=${encodeURIComponent(key)}`, {
+      headers: { "X-Bot-Token": BOT_TOKEN! },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { value: string | null };
+    return data.value;
+  } catch (err) {
+    log(`no se pudo leer el estado del bot ("${key}"): ${(err as Error).message}`);
+    return null;
+  }
+}
+
+async function setBotState(key: string, value: string): Promise<void> {
+  try {
+    await fetch(`${WEB_URL}/api/bot_state.php`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
+      body: JSON.stringify({ key, value }),
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch (err) {
+    log(`no se pudo guardar el estado del bot ("${key}"): ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Para cada puesto de ROSTER_ROLES, compara quién tiene el rol A en el
+ * servidor A y el rol B (su equivalente, si existe) en el servidor B. Si a
+ * alguien le falta en uno de los dos, se le añade ahí mismo. Devuelve, por
+ * `label`, la unión de quién tiene ya cualquiera de los dos roles (tras
+ * sincronizar).
+ */
+async function syncStaffRolesAndCollect(
+  guildA: import("discord.js").Guild,
+  guildB: import("discord.js").Guild
+): Promise<Map<string, Set<string>>> {
+  const holders = new Map<string, Set<string>>();
+
+  for (const { label, nameA, nameB } of ROSTER_ROLES) {
+    holders.set(label, new Set());
+    const roleA = guildA.roles.cache.find((r) => r.name === nameA) ?? null;
+    const roleB = nameB ? guildB.roles.cache.find((r) => r.name === nameB) ?? null : null;
+
+    const idsWithA = roleA ? new Set(roleA.members.keys()) : new Set<string>();
+    const idsWithB = roleB ? new Set(roleB.members.keys()) : new Set<string>();
+    const union = new Set([...idsWithA, ...idsWithB]);
+
+    for (const userId of union) {
+      holders.get(label)!.add(userId);
+
+      const hasA = idsWithA.has(userId);
+      const hasB = idsWithB.has(userId);
+      if (hasA === hasB) continue; // ya coincide en los dos (o no aplica porque nameB es null)
+
+      if (!hasB && roleB) {
+        const memberB = guildB.members.cache.get(userId);
+        if (memberB) {
+          try {
+            await memberB.roles.add(roleB);
+            log(`sync de staff: "${label}" añadido a ${userId} en ${guildB.id} (lo tenía en ${guildA.id}).`);
+          } catch (err) {
+            log(`no se pudo añadir "${label}" a ${userId} en ${guildB.id}: ${(err as Error).message}`);
+          }
+        }
+      } else if (!hasA && roleA) {
+        const memberA = guildA.members.cache.get(userId);
+        if (memberA) {
+          try {
+            await memberA.roles.add(roleA);
+            log(`sync de staff: "${label}" añadido a ${userId} en ${guildA.id} (lo tenía en ${guildB.id}).`);
+          } catch (err) {
+            log(`no se pudo añadir "${label}" a ${userId} en ${guildA.id}: ${(err as Error).message}`);
+          }
+        }
+      }
+    }
+  }
+
+  return holders;
+}
+
+function buildRosterEmbed(holders: Map<string, Set<string>>): EmbedBuilder {
+  const lines = ROSTER_ROLES.map(({ label }) => {
+    const ids = [...(holders.get(label) ?? [])];
+    const mentions = ids.length > 0 ? ids.map((id) => `<@${id}>`).join(" ") : "N/A";
+    return `**@${label}** - ${mentions}`;
+  });
+  return new EmbedBuilder()
+    .setColor(BRAND_COLOR)
+    .setTitle("Roster de staff")
+    .setDescription(lines.join("\n\n"))
+    .setFooter({ text: "Última actualización" })
+    .setTimestamp();
+}
+
+let rosterUpdateQueued = false;
+let rosterUpdateRunning = false;
+
+async function updateRosterMessage(): Promise<void> {
+  if (!ROSTER_CHANNEL_ID || !SECOND_GUILD_ID) return;
+  // Evita solapar dos actualizaciones a la vez si llegan varios cambios de
+  // rol seguidos -- la que estaba en curso ya recoge el estado más nuevo,
+  // así que basta con relanzar una vez más al terminar.
+  if (rosterUpdateRunning) {
+    rosterUpdateQueued = true;
+    return;
+  }
+  rosterUpdateRunning = true;
+
+  try {
+    const guildA = await client.guilds.fetch(GUILD_ID!);
+    const guildB = await client.guilds.fetch(SECOND_GUILD_ID);
+    await guildA.members.fetch();
+    await guildB.members.fetch();
+
+    const holders = await syncStaffRolesAndCollect(guildA, guildB);
+    const embed = buildRosterEmbed(holders);
+
+    const channel = await client.channels.fetch(ROSTER_CHANNEL_ID);
+    if (!channel || !channel.isTextBased() || !("send" in channel)) {
+      log(`ROSTER_CHANNEL_ID (${ROSTER_CHANNEL_ID}) no es un canal de texto válido o el bot no tiene acceso.`);
+      return;
+    }
+
+    const existingId = await getBotState(ROSTER_STATE_KEY);
+    if (existingId) {
+      try {
+        const existing = await channel.messages.fetch(existingId);
+        await existing.edit({ embeds: [embed] });
+        return;
+      } catch {
+        log(`el mensaje del roster (${existingId}) ya no existe -- se crea uno nuevo.`);
+      }
+    }
+
+    const sent = await channel.send({ embeds: [embed] });
+    await setBotState(ROSTER_STATE_KEY, sent.id);
+  } catch (err) {
+    log(`no se pudo actualizar el roster: ${(err as Error).message}`);
+  } finally {
+    rosterUpdateRunning = false;
+    if (rosterUpdateQueued) {
+      rosterUpdateQueued = false;
+      updateRosterMessage();
+    }
+  }
 }
 
 if (!BOT_TOKEN || !GUILD_ID) {
@@ -270,6 +496,13 @@ client.once("clientReady", async () => {
   await registerSlashCommands();
   await refreshInviteCache();
   log(`${inviteCache.size} invitaciones cacheadas`);
+  if (ROSTER_CHANNEL_ID && SECOND_GUILD_ID) {
+    await updateRosterMessage();
+    // Refresco periódico de seguridad además del en vivo -- pedido por el
+    // usuario ("la lista debe actualizarse frecuentemente"), por si algún
+    // evento de rol se pierde o el bot estuvo caído un momento.
+    setInterval(updateRosterMessage, ROSTER_SYNC_INTERVAL_MS);
+  }
 });
 
 client.on("inviteCreate", (invite: Invite) => {
@@ -327,6 +560,17 @@ client.on("guildMemberRemove", (member: GuildMember | PartialGuildMember) => {
   });
 });
 
+// Roster: dedicado y separado del logging de arriba porque este SÍ debe
+// reaccionar a los dos servidores (GUILD_ID y SECOND_GUILD_ID), no solo a
+// GUILD_ID.
+client.on("guildMemberRemove", (member: GuildMember | PartialGuildMember) => {
+  if (!isRosterGuild(member.guild.id)) return;
+  const hadRosterRole = member.roles?.cache?.some((role) => ROSTER_ROLE_NAME_SET.has(role.name)) ?? false;
+  if (hadRosterRole) {
+    updateRosterMessage();
+  }
+});
+
 client.on("guildMemberUpdate", (oldMember: GuildMember | PartialGuildMember, newMember: GuildMember) => {
   if (newMember.guild.id !== GUILD_ID) return;
 
@@ -352,6 +596,23 @@ client.on("guildMemberUpdate", (oldMember: GuildMember | PartialGuildMember, new
         message: `${newMember.user.tag} perdió el rol "${role.name}".`,
       });
     }
+  }
+
+});
+
+// Roster: dedicado y separado del logging de arriba porque este SÍ debe
+// reaccionar a los dos servidores (GUILD_ID y SECOND_GUILD_ID), no solo a
+// GUILD_ID.
+client.on("guildMemberUpdate", (oldMember: GuildMember | PartialGuildMember, newMember: GuildMember) => {
+  if (!isRosterGuild(newMember.guild.id)) return;
+
+  const oldRoles = oldMember.roles?.cache ?? new Collection();
+  const newRoles = newMember.roles.cache;
+  const rosterRoleChanged = [...newRoles.values(), ...oldRoles.values()].some(
+    (role) => ROSTER_ROLE_NAME_SET.has(role.name) && newRoles.has(role.id) !== oldRoles.has(role.id)
+  );
+  if (rosterRoleChanged) {
+    updateRosterMessage();
   }
 });
 
