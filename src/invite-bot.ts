@@ -198,31 +198,48 @@ function isRosterGuild(guildId: string): boolean {
   return guildId === GUILD_ID || guildId === SECOND_GUILD_ID;
 }
 
-async function getBotState(key: string): Promise<string | null> {
+/**
+ * `null` = se confirmó que no hay valor guardado. `undefined` = no se pudo
+ * saber (fallo de red/timeout/508 del hosting) -- distinción crítica: si se
+ * tratara igual que `null`, un fallo transitorio de esta llamada hace creer
+ * a `updateRosterMessage` que el mensaje del roster no existe todavía y
+ * manda uno nuevo cada vez en vez de editar el de siempre, duplicando el
+ * roster en el canal (bug real visto en producción).
+ */
+async function getBotState(key: string): Promise<string | null | undefined> {
   try {
     const res = await fetch(`${WEB_URL}/api/bot_state.php?key=${encodeURIComponent(key)}`, {
       headers: { "X-Bot-Token": BOT_TOKEN! },
       signal: AbortSignal.timeout(10000),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      log(`no se pudo leer el estado del bot ("${key}"): HTTP ${res.status}`);
+      return undefined;
+    }
     const data = (await res.json()) as { value: string | null };
     return data.value;
   } catch (err) {
     log(`no se pudo leer el estado del bot ("${key}"): ${(err as Error).message}`);
-    return null;
+    return undefined;
   }
 }
 
-async function setBotState(key: string, value: string): Promise<void> {
+async function setBotState(key: string, value: string): Promise<boolean> {
   try {
-    await fetch(`${WEB_URL}/api/bot_state.php`, {
+    const res = await fetch(`${WEB_URL}/api/bot_state.php`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
       body: JSON.stringify({ key, value }),
       signal: AbortSignal.timeout(10000),
     });
+    if (!res.ok) {
+      log(`no se pudo guardar el estado del bot ("${key}"): HTTP ${res.status}`);
+      return false;
+    }
+    return true;
   } catch (err) {
     log(`no se pudo guardar el estado del bot ("${key}"): ${(err as Error).message}`);
+    return false;
   }
 }
 
@@ -367,6 +384,10 @@ async function updateRosterMessage(): Promise<void> {
     }
 
     const existingId = await getBotState(ROSTER_STATE_KEY);
+    if (existingId === undefined) {
+      log(`no se pudo comprobar si ya existe un mensaje de roster -- se aborta este ciclo para no duplicarlo.`);
+      return;
+    }
     if (existingId) {
       try {
         const existing = await channel.messages.fetch(existingId);
@@ -378,7 +399,10 @@ async function updateRosterMessage(): Promise<void> {
     }
 
     const sent = await channel.send({ embeds: [embed] });
-    await setBotState(ROSTER_STATE_KEY, sent.id);
+    const saved = await setBotState(ROSTER_STATE_KEY, sent.id);
+    if (!saved) {
+      log(`aviso: el mensaje del roster ${sent.id} se envió pero no se pudo guardar su ID -- si esto persiste, el próximo ciclo podría duplicarlo.`);
+    }
   } catch (err) {
     log(`no se pudo actualizar el roster: ${(err as Error).message}`);
   } finally {
