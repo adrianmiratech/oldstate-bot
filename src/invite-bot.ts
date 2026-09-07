@@ -93,6 +93,11 @@ const ROSTER_CHANNEL_ID = process.env.ROSTER_CHANNEL_ID ?? "1511363696964800563"
 // tiene un rol de staff en uno de los dos servidores pero no en el otro,
 // se le añade el que le falte automáticamente.
 const SECOND_GUILD_ID = process.env.SECOND_GUILD_ID ?? "1381245443505393705";
+// Logo de staff para el embed del roster, alojado en el propio panel web.
+const ROSTER_LOGO_URL = process.env.ROSTER_LOGO_URL ?? "https://oldstate.sub-yorkhost.fr/old_staff.png";
+// Azul de marca del logo de staff (distinto del BRAND_COLOR naranja
+// general, para que el roster se distinga a simple vista).
+const ROSTER_COLOR = 0x1e3fae;
 
 // Roles reales de "Cola Prioritaria LVL 1/2/3" -- otorgados por el comando
 // /prioridad (los permisos del panel se leen de estos mismos roles, así
@@ -145,7 +150,6 @@ interface RosterRoleDef {
 
 const ROSTER_ROLES: RosterRoleDef[] = [
   { label: "CEO", nameA: "CEO", nameB: "CEO" },
-  { label: "*", nameA: "*", nameB: "*" },
   { label: "Direccion", nameA: "Direccion", nameB: "Direccion" },
   { label: "Jefe de Staff", nameA: "Jefe de Staff", nameB: "Jefe de Staff" },
   { label: "Administrador", nameA: "Administrador", nameB: "Administrador" },
@@ -206,30 +210,38 @@ async function setBotState(key: string, value: string): Promise<void> {
   }
 }
 
+interface RosterHolder {
+  /** ID del rol en el servidor B (el del canal del roster), o null si ese
+   * puesto no tiene equivalente ahí -- se usa para la mención real del
+   * encabezado de cada línea del embed. */
+  roleBId: string | null;
+  users: Set<string>;
+}
+
 /**
  * Para cada puesto de ROSTER_ROLES, compara quién tiene el rol A en el
  * servidor A y el rol B (su equivalente, si existe) en el servidor B. Si a
  * alguien le falta en uno de los dos, se le añade ahí mismo. Devuelve, por
  * `label`, la unión de quién tiene ya cualquiera de los dos roles (tras
- * sincronizar).
+ * sincronizar) junto con el ID del rol B para la mención del embed.
  */
 async function syncStaffRolesAndCollect(
   guildA: import("discord.js").Guild,
   guildB: import("discord.js").Guild
-): Promise<Map<string, Set<string>>> {
-  const holders = new Map<string, Set<string>>();
+): Promise<Map<string, RosterHolder>> {
+  const holders = new Map<string, RosterHolder>();
 
   for (const { label, nameA, nameB } of ROSTER_ROLES) {
-    holders.set(label, new Set());
     const roleA = guildA.roles.cache.find((r) => r.name === nameA) ?? null;
     const roleB = nameB ? guildB.roles.cache.find((r) => r.name === nameB) ?? null : null;
+    holders.set(label, { roleBId: roleB?.id ?? null, users: new Set() });
 
     const idsWithA = roleA ? new Set(roleA.members.keys()) : new Set<string>();
     const idsWithB = roleB ? new Set(roleB.members.keys()) : new Set<string>();
     const union = new Set([...idsWithA, ...idsWithB]);
 
     for (const userId of union) {
-      holders.get(label)!.add(userId);
+      holders.get(label)!.users.add(userId);
 
       const hasA = idsWithA.has(userId);
       const hasB = idsWithB.has(userId);
@@ -262,16 +274,26 @@ async function syncStaffRolesAndCollect(
   return holders;
 }
 
-function buildRosterEmbed(holders: Map<string, Set<string>>): EmbedBuilder {
+function buildRosterEmbed(holders: Map<string, RosterHolder>): EmbedBuilder {
+  // Mención real de rol (`<@&id>`) en vez de texto "@Nombre" -- pedido por
+  // el usuario: se ve como una mención de verdad (la píldora de color de
+  // Discord) pero, al ir dentro de un embed y no en el texto del mensaje,
+  // Discord nunca la notifica a nadie. Si ese puesto no tiene rol en el
+  // servidor del canal (Encargado DOJ), se deja el nombre en negrita.
   const lines = ROSTER_ROLES.map(({ label }) => {
-    const ids = [...(holders.get(label) ?? [])];
-    const mentions = ids.length > 0 ? ids.map((id) => `<@${id}>`).join(" ") : "N/A";
-    return `**@${label}** - ${mentions}`;
+    const holder = holders.get(label);
+    const heading = holder?.roleBId ? `<@&${holder.roleBId}>` : `**${label}**`;
+    const ids = [...(holder?.users ?? [])];
+    const mentions = ids.length > 0 ? ids.map((id) => `<@${id}>`).join(" ") : "*Nadie*";
+    return `${heading}\n${mentions}`;
   });
+
   return new EmbedBuilder()
-    .setColor(BRAND_COLOR)
-    .setTitle("Roster de staff")
+    .setColor(ROSTER_COLOR)
+    .setAuthor({ name: "OLD STATE STAFF", iconURL: ROSTER_LOGO_URL })
+    .setTitle("📋 Roster de staff")
     .setDescription(lines.join("\n\n"))
+    .setThumbnail(ROSTER_LOGO_URL)
     .setFooter({ text: "Última actualización" })
     .setTimestamp();
 }
