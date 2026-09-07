@@ -42,6 +42,7 @@ import {
   ChannelType,
   Client,
   Collection,
+  EmbedBuilder,
   GatewayIntentBits,
   Partials,
   REST,
@@ -55,6 +56,10 @@ import {
   type PartialMessage,
   type VoiceState,
 } from "discord.js";
+
+// Color de marca de Old State, usado en todos los embeds del bot (pedido
+// por el usuario: "todos los mensajes que envie el bot deben ser con embed").
+const BRAND_COLOR = 0xf2732e;
 
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
@@ -484,10 +489,17 @@ client.on("messageCreate", async (message: Message) => {
 
   try {
     const dm = await message.author.createDM();
-    await dm.send(
-      "Se ha registrado una infracción por spam/flood en tu cuenta en OLD STATE " +
-      `(canal <#${message.channelId}>). Tus mensajes han sido borrados. Evita enviar muchos mensajes seguidos en poco tiempo.`
-    );
+    await dm.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(BRAND_COLOR)
+          .setTitle("⚠️ Infracción de spam/flood")
+          .setDescription(
+            `Se ha registrado una infracción por spam/flood en tu cuenta en OLD STATE (canal <#${message.channelId}>). ` +
+            "Tus mensajes han sido borrados. Evita enviar muchos mensajes seguidos en poco tiempo."
+          ),
+      ],
+    });
   } catch (err) {
     log(`no se pudo avisar por DM a ${authorId}: ${(err as Error).message}`);
   }
@@ -520,10 +532,16 @@ client.on("messageCreate", async (message: Message) => {
 
   try {
     const dm = await message.author.createDM();
-    await dm.send(
-      "Se ha registrado una mención no autorizada a @everyone/@here en tu cuenta en OLD STATE. " +
-      "Tu mensaje ha sido borrado."
-    );
+    await dm.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(BRAND_COLOR)
+          .setTitle("⚠️ Mención no autorizada")
+          .setDescription(
+            "Se ha registrado una mención no autorizada a @everyone/@here en tu cuenta en OLD STATE. Tu mensaje ha sido borrado."
+          ),
+      ],
+    });
   } catch (err) {
     log(`no se pudo avisar por DM a ${message.author.id}: ${(err as Error).message}`);
   }
@@ -556,9 +574,14 @@ async function checkWatchedBot(): Promise<void> {
       try {
         const owner = await client.users.fetch(WATCHDOG_DM_ID);
         const dm = await owner.createDM();
-        await dm.send(
-          "⚠️ El bot **Old State 2000** ha sido detectado como desconectado. Revísalo para su corrección."
-        );
+        await dm.send({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(0xe14b3c)
+              .setTitle("🔴 Bot desconectado")
+              .setDescription("El bot **Old State 2000** ha sido detectado como desconectado. Revísalo para su corrección."),
+          ],
+        });
       } catch (err) {
         log(`no se pudo avisar por DM al owner del vigilante: ${(err as Error).message}`);
       }
