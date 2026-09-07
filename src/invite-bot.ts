@@ -165,8 +165,24 @@ const ROSTER_ROLES: RosterRoleDef[] = [
   { label: "Encargado/a entrevistadores", nameA: "Encargado/a entrevistadores", nameB: "Encargado entrevistador" },
   { label: "Encargado/a economía", nameA: "Encargado/a economía", nameB: "Encargado Economia" },
   { label: "Encargado SAPD", nameA: "Encargado SAPD", nameB: "Encargado SAPD" },
-  { label: "Encargado DOJ", nameA: "Encargado DOJ", nameB: null },
+  { label: "Encargado DOJ", nameA: "Encargado DOJ", nameB: "Encargado DOJ" },
   { label: "Encargado SAED", nameA: "Encargado SAED", nameB: "Encargado SAED" },
+];
+// Puestos de la escalera de staff (de mayor a menor rango) -- si alguien
+// tiene varios a la vez (ej. CEO y Direccion), solo debe aparecer en el más
+// alto de los dos para no duplicarse. Los puestos de "Encargado/a *" y
+// Developer quedan fuera a propósito: esos sí se muestran junto a un rango
+// de la escalera (ej. CEO y Encargado DOJ a la vez), pedido explícitamente
+// por el usuario.
+const STAFF_LADDER_LABELS = [
+  "CEO",
+  "Direccion",
+  "Jefe de Staff",
+  "Administrador",
+  "Moderador",
+  "Helper LVL 3",
+  "Helper LVL 2",
+  "Helper LVL 1",
 ];
 // Todos los nombres de rol que intervienen en el roster, en CUALQUIERA de
 // los dos servidores -- usado solo para detectar rápido si un cambio de
@@ -274,6 +290,28 @@ async function syncStaffRolesAndCollect(
   return holders;
 }
 
+/**
+ * Si alguien tiene varios puestos de la escalera de staff a la vez (ej. CEO
+ * y Direccion), lo deja solo en el más alto (`STAFF_LADDER_LABELS`, de mayor
+ * a menor) y lo quita de los inferiores, para que no salga duplicado en el
+ * roster. No toca "Encargado/a *"/Developer: esos siguen mostrándose junto
+ * a un rango de la escalera sin problema.
+ */
+function dedupeStaffLadder(holders: Map<string, RosterHolder>): void {
+  const seen = new Set<string>();
+  for (const label of STAFF_LADDER_LABELS) {
+    const holder = holders.get(label);
+    if (!holder) continue;
+    for (const userId of holder.users) {
+      if (seen.has(userId)) {
+        holder.users.delete(userId);
+      } else {
+        seen.add(userId);
+      }
+    }
+  }
+}
+
 function buildRosterEmbed(holders: Map<string, RosterHolder>): EmbedBuilder {
   // Mención real de rol (`<@&id>`) en vez de texto "@Nombre" -- pedido por
   // el usuario: se ve como una mención de verdad (la píldora de color de
@@ -319,6 +357,7 @@ async function updateRosterMessage(): Promise<void> {
     await guildB.members.fetch();
 
     const holders = await syncStaffRolesAndCollect(guildA, guildB);
+    dedupeStaffLadder(holders);
     const embed = buildRosterEmbed(holders);
 
     const channel = await client.channels.fetch(ROSTER_CHANNEL_ID);
