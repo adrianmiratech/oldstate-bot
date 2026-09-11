@@ -503,6 +503,19 @@ async function recordJoin(inviterDiscordId: string, invitedDiscordId: string, in
 
 // ===== Comandos de barra (slash commands) =====
 
+// Mismas categorías que CK_CATEGORIES en src/lib/cks.types.ts del panel --
+// mantener ambas listas sincronizadas si se añade una categoría nueva.
+const CK_CATEGORIES = [
+  "Voluntario",
+  "Administrativo",
+  "Policial",
+  "Criminal (banda)",
+  "A integrante (por su jefe)",
+  "Por mafia",
+  "A líder",
+  "Otro",
+] as const;
+
 const COMMANDS = [
   new SlashCommandBuilder()
     .setName("prioridad")
@@ -520,6 +533,24 @@ const COMMANDS = [
           { name: "Quitar prioridad", value: "0" }
         )
     )
+    .toJSON(),
+  // Pedido por el usuario: "un comando para el bot para registrar [CKs]...
+  // se podra registrar desde la web y desde discord". Registra el CK en el
+  // mismo sitio que la web (tabla `cks`, vía api/ck_record.php) para que
+  // aparezca junto a los dados de alta desde el panel en
+  // /panel/cks y en la ficha de cada usuario.
+  new SlashCommandBuilder()
+    .setName("ck")
+    .setDescription("Registra un Character Kill (CK) a un usuario")
+    .addUserOption((opt) => opt.setName("usuario").setDescription("Usuario al que se le hace CK").setRequired(true))
+    .addStringOption((opt) =>
+      opt
+        .setName("categoria")
+        .setDescription("Tipo de CK")
+        .setRequired(true)
+        .addChoices(...CK_CATEGORIES.map((c) => ({ name: c, value: c })))
+    )
+    .addStringOption((opt) => opt.setName("motivo").setDescription("Motivo del CK").setRequired(true))
     .toJSON(),
 ];
 
@@ -579,10 +610,52 @@ async function handlePrioridadCommand(interaction: ChatInputCommandInteraction):
   }
 }
 
+async function handleCkCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  if (!interaction.guild || !interaction.member) return;
+  const invoker = interaction.member as GuildMember;
+  if (!isStaffMember(invoker)) {
+    await interaction.reply({ content: "No tienes permiso para usar este comando.", ephemeral: true });
+    return;
+  }
+
+  const targetUser = interaction.options.getUser("usuario", true);
+  const category = interaction.options.getString("categoria", true);
+  const reason = interaction.options.getString("motivo", true);
+
+  try {
+    const res = await fetch(`${WEB_URL}/api/ck_record.php`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
+      body: JSON.stringify({
+        discordId: targetUser.id,
+        displayName: targetUser.username,
+        category,
+        reason,
+        registeredByDiscordId: invoker.id,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) {
+      log(`el panel rechazó el CK de ${invoker.id} sobre ${targetUser.id} (HTTP ${res.status})`);
+      await interaction.reply({ content: "No se pudo registrar el CK en el panel.", ephemeral: true });
+      return;
+    }
+    await interaction.reply({
+      content: `CK registrado a ${targetUser}: **${category}** — ${reason}`,
+      ephemeral: false,
+    });
+  } catch (err) {
+    log(`fallo en /ck: ${(err as Error).message}`);
+    await interaction.reply({ content: "No se pudo completar la acción.", ephemeral: true });
+  }
+}
+
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName === "prioridad") {
     await handlePrioridadCommand(interaction);
+  } else if (interaction.commandName === "ck") {
+    await handleCkCommand(interaction);
   }
 });
 
