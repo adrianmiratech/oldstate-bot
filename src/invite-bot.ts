@@ -76,7 +76,13 @@ const BRAND_COLOR = 0xf2732e;
 
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
-const WEB_URL = process.env.PANEL_WEB_URL ?? "https://oldstate.sub-yorkhost.fr";
+// El dominio viejo (oldstate.sub-yorkhost.fr) dejó de resolver tras
+// mudarse a oldstate.adstudio.es -- pedido por el usuario tras ver que
+// NINGUNA función del bot que habla con la web funcionaba (/registrar-streamer,
+// /ck, el estado del servidor...), todas fallando en red porque
+// PANEL_WEB_URL nunca se actualizó en Northflank y caían en este valor por
+// defecto, ya muerto.
+const WEB_URL = process.env.PANEL_WEB_URL ?? "https://oldstate.adstudio.es";
 const VERIFY_CHANNEL_ID = process.env.VERIFY_CHANNEL_ID ?? "1508924270447689873";
 const VERIFY_ROLE_ID = process.env.VERIFY_ROLE_ID ?? "1508918751918166291";
 const NO_WHITELIST_ROLE_ID = process.env.NO_WHITELIST_ROLE_ID ?? "1508923770277199942";
