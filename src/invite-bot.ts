@@ -274,14 +274,6 @@ interface ServerStatus {
   openingAt: number | null;
 }
 
-/** Barra de progreso de texto (estilo pedido por el usuario) -- "▰▰▰▰░░░░░░" según jugadores/aforo. */
-function slotsProgressBar(online: number, max: number): string {
-  if (max <= 0) return "";
-  const totalBlocks = 10;
-  const filled = Math.max(0, Math.min(totalBlocks, Math.round((online / max) * totalBlocks)));
-  return "▰".repeat(filled) + "░".repeat(totalBlocks - filled);
-}
-
 function buildServerStatusEmbed(status: ServerStatus): EmbedBuilder {
   const embed = new EmbedBuilder()
     .setAuthor({ name: "OLD STATE RP", iconURL: LOGO_URL })
@@ -295,8 +287,8 @@ function buildServerStatusEmbed(status: ServerStatus): EmbedBuilder {
       .addFields(
         {
           name: "👥 Jugadores",
-          value: `${status.playersOnline}/${status.maxSlots}  ${slotsProgressBar(status.playersOnline, status.maxSlots)}`,
-          inline: false,
+          value: `${status.playersOnline}/${status.maxSlots}`,
+          inline: true,
         },
         { name: "🔒 Whitelist", value: status.whitelistOnly ? "Activa" : "Desactivada", inline: true }
       );
