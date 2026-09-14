@@ -38,7 +38,10 @@ Variables en `.env`:
 |---|---|
 | `DISCORD_BOT_TOKEN` | Token del bot (Developer Portal → Bot → Reset Token) |
 | `DISCORD_GUILD_ID` | ID del servidor de Discord de OLD STATE |
-| `PANEL_WEB_URL` | URL base del panel (por defecto `https://oldstate.adstudio.es`) |
+
+La URL del panel (`https://oldstate.adstudio.es`) está fija en el código
+(no es una variable de entorno) para evitar que una variable vieja puesta a
+mano en el servidor de despliegue vuelva a apuntar al dominio muerto.
 
 **El archivo `.env` nunca se sube a git** (está en `.gitignore`) — configúralo
 directamente en el servidor donde despliegues el bot.

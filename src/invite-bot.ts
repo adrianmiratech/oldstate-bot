@@ -76,13 +76,16 @@ const BRAND_COLOR = 0xf2732e;
 
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
-// El dominio viejo (oldstate.sub-yorkhost.fr) dejó de resolver tras
-// mudarse a oldstate.adstudio.es -- pedido por el usuario tras ver que
-// NINGUNA función del bot que habla con la web funcionaba (/registrar-streamer,
-// /ck, el estado del servidor...), todas fallando en red porque
-// PANEL_WEB_URL nunca se actualizó en Northflank y caían en este valor por
-// defecto, ya muerto.
-const WEB_URL = process.env.PANEL_WEB_URL ?? "https://oldstate.adstudio.es";
+// FIJO a propósito, ya NO se lee de PANEL_WEB_URL -- el dominio viejo
+// (oldstate.sub-yorkhost.fr) dejó de resolver a esta web hace tiempo (ahora
+// le sirve el certificado de otro cliente del mismo hosting, "adenrp.fr"),
+// pero esa variable seguía puesta a mano en Northflank y ganaba siempre al
+// valor por defecto del código, así que cambiar el propio código no bastaba
+// -- de ahí "ERR_TLS_CERT_ALTNAME_INVALID ... oldstate.sub-yorkhost.fr ...
+// no está en los altnames del cert ... adenrp.fr" pese a los intentos
+// anteriores. Quitando la variable de en medio, no hay nada que puje contra
+// este valor.
+const WEB_URL = "https://oldstate.adstudio.es";
 const VERIFY_CHANNEL_ID = process.env.VERIFY_CHANNEL_ID ?? "1508924270447689873";
 const VERIFY_ROLE_ID = process.env.VERIFY_ROLE_ID ?? "1508918751918166291";
 const NO_WHITELIST_ROLE_ID = process.env.NO_WHITELIST_ROLE_ID ?? "1508923770277199942";
