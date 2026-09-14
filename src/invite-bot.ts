@@ -687,6 +687,22 @@ const CK_CATEGORIES = [
   "Otro",
 ] as const;
 
+// Mismas gravedades que USER_SANCTION_SEVERITIES en
+// src/app/panel/(app)/sanciones/page.tsx del panel -- mantener ambas
+// listas sincronizadas si se añade una gravedad nueva.
+const SANCTION_SEVERITIES = [
+  "Aviso verbal",
+  "Warn leve",
+  "Warn medio",
+  "Warn grave",
+  "Baneo 1 día",
+  "Baneo 3 días",
+  "Baneo 1 semana",
+  "Baneo 2 semanas",
+  "Baneo 1 mes",
+  "Permabaneo",
+] as const;
+
 const COMMANDS = [
   new SlashCommandBuilder()
     .setName("prioridad")
@@ -740,6 +756,23 @@ const COMMANDS = [
     .addStringOption((opt) =>
       opt.setName("canal").setDescription("Nombre del canal (sin URL completa)").setRequired(true)
     )
+    .toJSON(),
+  // Pedido por el usuario: "añade para poder añadir una sancion via comando
+  // de discord". Registra la sanción en el mismo sitio que la web (tabla
+  // `sanctions`, vía api/sanction_record_from_discord.php), siempre de tipo
+  // "user" -- las sanciones internas de staff no se dan de alta por aquí.
+  new SlashCommandBuilder()
+    .setName("sancionar")
+    .setDescription("Aplica una sanción a un jugador")
+    .addUserOption((opt) => opt.setName("usuario").setDescription("Jugador a sancionar").setRequired(true))
+    .addStringOption((opt) =>
+      opt
+        .setName("gravedad")
+        .setDescription("Tipo de sanción")
+        .setRequired(true)
+        .addChoices(...SANCTION_SEVERITIES.map((s) => ({ name: s, value: s })))
+    )
+    .addStringOption((opt) => opt.setName("motivo").setDescription("Motivo de la sanción").setRequired(true))
     .toJSON(),
 ];
 
@@ -839,6 +872,46 @@ async function handleCkCommand(interaction: ChatInputCommandInteraction): Promis
   }
 }
 
+async function handleSancionarCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  if (!interaction.guild || !interaction.member) return;
+  const invoker = interaction.member as GuildMember;
+  if (!isStaffMember(invoker)) {
+    await interaction.reply({ content: "No tienes permiso para usar este comando.", ephemeral: true });
+    return;
+  }
+
+  const targetUser = interaction.options.getUser("usuario", true);
+  const severity = interaction.options.getString("gravedad", true);
+  const reason = interaction.options.getString("motivo", true);
+
+  try {
+    const res = await fetchWeb(`${WEB_URL}/api/sanction_record_from_discord.php`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
+      body: JSON.stringify({
+        discordId: targetUser.id,
+        displayName: targetUser.username,
+        severity,
+        reason,
+        appliedByDiscordId: invoker.id,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) {
+      log(`el panel rechazó la sanción de ${invoker.id} sobre ${targetUser.id} (HTTP ${res.status})`);
+      await interaction.reply({ content: "No se pudo registrar la sanción en el panel.", ephemeral: true });
+      return;
+    }
+    await interaction.reply({
+      content: `Sanción aplicada a ${targetUser}: **${severity}** — ${reason}`,
+      ephemeral: true,
+    });
+  } catch (err) {
+    log(`fallo en /sancionar: ${describeFetchError(err)}`);
+    await interaction.reply({ content: `No se pudo completar la acción (${describeFetchError(err)}).`, ephemeral: true });
+  }
+}
+
 async function handleRegistrarStreamerCommand(interaction: ChatInputCommandInteraction): Promise<void> {
   if (!interaction.guild || !interaction.member) return;
   const invoker = interaction.member as GuildMember;
@@ -928,6 +1001,8 @@ client.on("interactionCreate", async (interaction) => {
     await handleCkCommand(interaction);
   } else if (interaction.commandName === "registrar-streamer") {
     await handleRegistrarStreamerCommand(interaction);
+  } else if (interaction.commandName === "sancionar") {
+    await handleSancionarCommand(interaction);
   }
 });
 
