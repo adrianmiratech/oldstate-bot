@@ -155,6 +155,23 @@ function log(msg: string): void {
  * servidor cierre la conexión en vez de mantenerla viva (evita la reutilización
  * que dispara el bug) y reintentar una vez si aun así falla en seco.
  */
+/**
+ * "fetch failed" (el .message de undici) no dice nada por sí solo -- el
+ * motivo real (DNS, conexión rechazada, TLS...) va en err.cause, que
+ * fetch() nunca expone en el .message. Pedido por el usuario tras ver que
+ * el reintento con Connection:close NO lo arregló (así que no era el bug
+ * de conexión reutilizada con el "Upgrade: h2,h2c" de Apache) -- hace
+ * falta ver la causa real para saber si es de red de verdad o de otra cosa.
+ */
+function describeFetchError(err: unknown): string {
+  const e = err as { message?: string; cause?: unknown };
+  const cause = e?.cause as { message?: string; code?: string } | undefined;
+  if (cause) {
+    return `${e.message ?? "error"} <- causa: ${cause.code ? `${cause.code} ` : ""}${cause.message ?? JSON.stringify(cause)}`;
+  }
+  return e?.message ?? String(err);
+}
+
 async function fetchWeb(url: string, options: RequestInit = {}, retries = 2): Promise<Response> {
   const headers = { ...(options.headers as Record<string, string> | undefined), Connection: "close" };
   let lastErr: unknown;
@@ -164,7 +181,7 @@ async function fetchWeb(url: string, options: RequestInit = {}, retries = 2): Pr
     } catch (err) {
       lastErr = err;
       if (attempt < retries) {
-        log(`fetch a ${url} falló (${(err as Error).message}), reintentando (${attempt + 1}/${retries})...`);
+        log(`fetch a ${url} falló (${describeFetchError(err)}), reintentando (${attempt + 1}/${retries})...`);
         await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
       }
     }
@@ -869,8 +886,8 @@ async function handleRegistrarStreamerCommand(interaction: ChatInputCommandInter
       ephemeral: false,
     });
   } catch (err) {
-    log(`fallo en /registrar-streamer: ${(err as Error).message}`);
-    await interaction.reply({ content: `No se pudo completar la acción (${(err as Error).message}).`, ephemeral: true });
+    log(`fallo en /registrar-streamer: ${describeFetchError(err)}`);
+    await interaction.reply({ content: `No se pudo completar la acción (${describeFetchError(err)}).`, ephemeral: true });
   }
 }
 
