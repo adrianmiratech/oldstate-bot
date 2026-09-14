@@ -747,6 +747,13 @@ const COMMANDS = [
     .setDescription("Da de alta a un streamer y le da el rol de Streamer")
     .addUserOption((opt) => opt.setName("usuario").setDescription("Cuenta de Discord del streamer").setRequired(true))
     .addStringOption((opt) =>
+      // Pedido por el usuario: "no me registra bien los streamers" -- antes
+      // se mandaba el username de Discord como nombre del streamer (podía
+      // no tener nada que ver con cómo se le conoce en Twitch/Kick), igual
+      // que ya pide el formulario web ("Nombre") en /panel/streamers.
+      opt.setName("nombre").setDescription("Nombre con el que aparece (como en el formulario web)").setRequired(true)
+    )
+    .addStringOption((opt) =>
       opt
         .setName("plataforma")
         .setDescription("Dónde emite")
@@ -928,6 +935,7 @@ async function handleRegistrarStreamerCommand(interaction: ChatInputCommandInter
   }
 
   const targetUser = interaction.options.getUser("usuario", true);
+  const displayName = interaction.options.getString("nombre", true);
   const platform = interaction.options.getString("plataforma", true) as "twitch" | "kick";
   const channelName = interaction.options.getString("canal", true);
 
@@ -937,7 +945,7 @@ async function handleRegistrarStreamerCommand(interaction: ChatInputCommandInter
       headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
       body: JSON.stringify({
         discordId: targetUser.id,
-        displayName: targetUser.username,
+        displayName,
         platform,
         channelName,
         registeredByDiscordId: invoker.id,
