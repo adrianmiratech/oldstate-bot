@@ -818,8 +818,13 @@ async function handleRegistrarStreamerCommand(interaction: ChatInputCommandInter
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) {
-      log(`el panel rechazó el streamer registrado por ${invoker.id} sobre ${targetUser.id} (HTTP ${res.status})`);
-      await interaction.reply({ content: "No se pudo registrar el streamer en el panel.", ephemeral: true });
+      const errBody = await res.json().catch(() => ({}));
+      const detail = (errBody as { error?: string }).error;
+      log(`el panel rechazó el streamer registrado por ${invoker.id} sobre ${targetUser.id} (HTTP ${res.status})${detail ? `: ${detail}` : ""}`);
+      await interaction.reply({
+        content: `No se pudo registrar el streamer en el panel (HTTP ${res.status}${detail ? `: ${detail}` : ""}).`,
+        ephemeral: true,
+      });
       return;
     }
     const data = (await res.json().catch(() => ({}))) as { roleGranted?: boolean };
@@ -830,7 +835,7 @@ async function handleRegistrarStreamerCommand(interaction: ChatInputCommandInter
     });
   } catch (err) {
     log(`fallo en /registrar-streamer: ${(err as Error).message}`);
-    await interaction.reply({ content: "No se pudo completar la acción.", ephemeral: true });
+    await interaction.reply({ content: `No se pudo completar la acción (${(err as Error).message}).`, ephemeral: true });
   }
 }
 
