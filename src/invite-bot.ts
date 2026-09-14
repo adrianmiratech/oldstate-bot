@@ -715,7 +715,41 @@ async function handleRegistrarStreamerCommand(interaction: ChatInputCommandInter
   }
 }
 
+// Pedido por el usuario: "en scripts pendientes... añade un boton al
+// mensaje que sea marcar como instalado y asi que se actualice el estado
+// automaticamente". El botón viaja en el propio DM que ya manda
+// scripts_pending_index.php/scripts_pending_item.php (custom_id
+// "script_installed:<id>"); aquí solo se recibe el clic y se avisa al panel.
+async function handleScriptInstalledButton(interaction: import("discord.js").ButtonInteraction): Promise<void> {
+  const id = interaction.customId.slice("script_installed:".length);
+  try {
+    const res = await fetch(`${WEB_URL}/api/scripts_pending_mark_installed_from_discord.php`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
+      body: JSON.stringify({ id, markedByDiscordId: interaction.user.id }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) {
+      await interaction.reply({ content: "No se pudo marcar como instalado (¿ya se había borrado?).", ephemeral: true });
+      return;
+    }
+    // Deshabilita el botón en el propio mensaje para que no se pueda pulsar
+    // dos veces, en vez de dejarlo tal cual tras el primer clic.
+    await interaction.update({
+      content: `${interaction.message.content}\n\n✅ Marcado como instalado por ${interaction.user}.`,
+      components: [],
+    });
+  } catch (err) {
+    log(`fallo marcando script instalado (${id}): ${(err as Error).message}`);
+    await interaction.reply({ content: "No se pudo completar la acción.", ephemeral: true }).catch(() => {});
+  }
+}
+
 client.on("interactionCreate", async (interaction) => {
+  if (interaction.isButton() && interaction.customId.startsWith("script_installed:")) {
+    await handleScriptInstalledButton(interaction);
+    return;
+  }
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName === "prioridad") {
     await handlePrioridadCommand(interaction);
