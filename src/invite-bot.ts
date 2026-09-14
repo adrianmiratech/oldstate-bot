@@ -783,7 +783,7 @@ async function handlePrioridadCommand(interaction: ChatInputCommandInteraction):
     const label = nivel === "0" ? "sin prioridad" : `Nivel ${nivel}`;
     await interaction.reply({
       content: `${targetUser} ahora tiene: **${label}**.`,
-      ephemeral: false,
+      ephemeral: true,
     });
 
     logEvent("bot.command_prioridad", {
@@ -831,7 +831,7 @@ async function handleCkCommand(interaction: ChatInputCommandInteraction): Promis
     }
     await interaction.reply({
       content: `CK registrado a ${targetUser}: **${category}** — ${reason}`,
-      ephemeral: false,
+      ephemeral: true,
     });
   } catch (err) {
     log(`fallo en /ck: ${(err as Error).message}`);
@@ -878,7 +878,7 @@ async function handleRegistrarStreamerCommand(interaction: ChatInputCommandInter
     const roleNote = data.roleGranted === false ? " (no se le pudo dar el rol de Streamer en Discord)" : "";
     await interaction.reply({
       content: `${targetUser} registrado como streamer de **${platform === "twitch" ? "Twitch" : "Kick"}** (canal \`${channelName}\`)${roleNote}.`,
-      ephemeral: false,
+      ephemeral: true,
     });
   } catch (err) {
     log(`fallo en /registrar-streamer: ${describeFetchError(err)}`);
