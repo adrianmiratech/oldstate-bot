@@ -200,6 +200,125 @@ const ROSTER_ROLE_NAME_SET = new Set(
 const ROSTER_STATE_KEY = "roster_message_id";
 const ROSTER_SYNC_INTERVAL_MS = 5 * 60 * 1000; // refresco periódico de seguridad, además del en vivo
 
+// ===== Estado del servidor en #estado-servidor: pedido por el usuario
+// ("que se actualice sola") -- en vez de un mensaje estático que había que
+// reenviar a mano, se edita siempre el mismo mensaje. Mismo patrón de
+// "editar si existe, crear una única vez si no" que updateRosterMessage(). =====
+const SERVER_STATUS_CHANNEL_ID = process.env.SERVER_STATUS_CHANNEL_ID ?? "1548916370719383552";
+const SERVER_STATUS_STATE_KEY = "server_status_message_id";
+const SERVER_STATUS_UPDATE_INTERVAL_MS = 5 * 60 * 1000;
+const LOGO_URL = `${WEB_URL}/logo.webp`;
+
+interface ServerStatus {
+  online: boolean;
+  playersOnline: number;
+  maxSlots: number;
+  queueLength: number;
+  whitelistOnly: boolean;
+  connectAddress: string | null;
+  openingAt: number | null;
+}
+
+/** Barra de progreso de texto (estilo pedido por el usuario) -- "▰▰▰▰░░░░░░" según jugadores/aforo. */
+function slotsProgressBar(online: number, max: number): string {
+  if (max <= 0) return "";
+  const totalBlocks = 10;
+  const filled = Math.max(0, Math.min(totalBlocks, Math.round((online / max) * totalBlocks)));
+  return "▰".repeat(filled) + "░".repeat(totalBlocks - filled);
+}
+
+function buildServerStatusEmbed(status: ServerStatus): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setAuthor({ name: "OLD STATE RP", iconURL: LOGO_URL })
+    .setThumbnail(LOGO_URL)
+    .setTimestamp();
+
+  if (status.online) {
+    embed
+      .setTitle("🟢 Servidor en línea")
+      .setColor(0x3ef07f)
+      .addFields(
+        {
+          name: "👥 Jugadores",
+          value: `${status.playersOnline}/${status.maxSlots}  ${slotsProgressBar(status.playersOnline, status.maxSlots)}`,
+          inline: false,
+        },
+        { name: "🔒 Whitelist", value: status.whitelistOnly ? "Activa" : "Desactivada", inline: true }
+      );
+    if (status.queueLength > 0) {
+      embed.addFields({ name: "⏳ En cola", value: String(status.queueLength), inline: true });
+    }
+    if (status.connectAddress) {
+      embed.addFields({ name: "🔌 Conectar", value: `\`${status.connectAddress}\``, inline: true });
+    }
+  } else {
+    embed.setTitle("🔴 Servidor fuera de línea").setColor(0xe14b3c).setDescription("El servidor está desconectado en este momento.");
+  }
+
+  if (status.openingAt && status.openingAt > Date.now()) {
+    embed.addFields({ name: "🚀 Apertura", value: `<t:${Math.floor(status.openingAt / 1000)}:R>`, inline: true });
+  }
+
+  embed.setFooter({ text: "Se actualiza solo cada 5 minutos", iconURL: LOGO_URL });
+  return embed;
+}
+
+let serverStatusUpdateRunning = false;
+let serverStatusUpdateQueued = false;
+
+async function updateServerStatusMessage(): Promise<void> {
+  if (serverStatusUpdateRunning) {
+    serverStatusUpdateQueued = true;
+    return;
+  }
+  serverStatusUpdateRunning = true;
+
+  try {
+    const res = await fetch(`${WEB_URL}/api/status.php`, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) {
+      log(`no se pudo consultar el estado del servidor (HTTP ${res.status}) -- se reintenta en el siguiente ciclo.`);
+      return;
+    }
+    const status = (await res.json()) as ServerStatus;
+    const embed = buildServerStatusEmbed(status);
+
+    const channel = await client.channels.fetch(SERVER_STATUS_CHANNEL_ID);
+    if (!channel || !channel.isTextBased() || !("send" in channel)) {
+      log(`SERVER_STATUS_CHANNEL_ID (${SERVER_STATUS_CHANNEL_ID}) no es un canal de texto válido o el bot no tiene acceso.`);
+      return;
+    }
+
+    const existingId = await getBotState(SERVER_STATUS_STATE_KEY);
+    if (existingId === undefined) {
+      log("no se pudo comprobar si ya existe un mensaje de estado del servidor -- se aborta este ciclo para no duplicarlo.");
+      return;
+    }
+    if (existingId) {
+      try {
+        const existing = await channel.messages.fetch(existingId);
+        await existing.edit({ content: "", embeds: [embed] });
+      } catch (err) {
+        log(`el mensaje guardado de estado del servidor (${existingId}) ya no se puede editar (${(err as Error).message}) -- no se crea uno nuevo automáticamente, hace falta revisarlo a mano.`);
+      }
+      return;
+    }
+
+    const sent = await channel.send({ embeds: [embed] });
+    const saved = await setBotState(SERVER_STATUS_STATE_KEY, sent.id);
+    if (!saved) {
+      log(`aviso: el primer mensaje de estado del servidor ${sent.id} se envió pero no se pudo guardar su ID.`);
+    }
+  } catch (err) {
+    log(`no se pudo actualizar el estado del servidor: ${(err as Error).message}`);
+  } finally {
+    serverStatusUpdateRunning = false;
+    if (serverStatusUpdateQueued) {
+      serverStatusUpdateQueued = false;
+      updateServerStatusMessage();
+    }
+  }
+}
+
 function isRosterGuild(guildId: string): boolean {
   return guildId === GUILD_ID || guildId === SECOND_GUILD_ID;
 }
@@ -804,6 +923,10 @@ client.once("clientReady", async () => {
     setInterval(updateRosterMessage, ROSTER_SYNC_INTERVAL_MS);
   }
   setInterval(sendDueScheduledMessages, SCHEDULED_MESSAGES_INTERVAL_MS);
+  if (SERVER_STATUS_CHANNEL_ID) {
+    await updateServerStatusMessage();
+    setInterval(updateServerStatusMessage, SERVER_STATUS_UPDATE_INTERVAL_MS);
+  }
 });
 
 client.on("inviteCreate", (invite: Invite) => {
