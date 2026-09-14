@@ -143,6 +143,35 @@ function log(msg: string): void {
   console.log(`[oldstate-bot] ${msg}`);
 }
 
+/**
+ * Envoltorio de fetch para TODAS las llamadas del bot a la web -- pedido
+ * por el usuario tras ver "No se pudo completar la acción (fetch failed)."
+ * en /registrar-streamer con la URL ya corregida. "fetch failed" es el
+ * error genérico de undici (el fetch nativo de Node) cuando la conexión en
+ * sí falla, no cuando el servidor responde con error -- un patrón conocido
+ * con servidores Apache que anuncian "Upgrade: h2,h2c" en la respuesta
+ * (como este hosting) reutilizando una conexión mantenida viva, que confunde
+ * a algunas versiones de undici. Dos mitigaciones baratas: pedir que el
+ * servidor cierre la conexión en vez de mantenerla viva (evita la reutilización
+ * que dispara el bug) y reintentar una vez si aun así falla en seco.
+ */
+async function fetchWeb(url: string, options: RequestInit = {}, retries = 2): Promise<Response> {
+  const headers = { ...(options.headers as Record<string, string> | undefined), Connection: "close" };
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fetch(url, { ...options, headers });
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries) {
+        log(`fetch a ${url} falló (${(err as Error).message}), reintentando (${attempt + 1}/${retries})...`);
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 // ===== Roster en vivo + sincronización de roles de staff entre servidores =====
 //
 // Pedido por el usuario a partir de un mensaje que mandaba a mano y quedaba
@@ -280,7 +309,7 @@ async function updateServerStatusMessage(): Promise<void> {
   serverStatusUpdateRunning = true;
 
   try {
-    const res = await fetch(`${WEB_URL}/api/status.php`, { signal: AbortSignal.timeout(10000) });
+    const res = await fetchWeb(`${WEB_URL}/api/status.php`, { signal: AbortSignal.timeout(10000) });
     if (!res.ok) {
       log(`no se pudo consultar el estado del servidor (HTTP ${res.status}) -- se reintenta en el siguiente ciclo.`);
       return;
@@ -339,7 +368,7 @@ function isRosterGuild(guildId: string): boolean {
  */
 async function getBotState(key: string): Promise<string | null | undefined> {
   try {
-    const res = await fetch(`${WEB_URL}/api/bot_state.php?key=${encodeURIComponent(key)}`, {
+    const res = await fetchWeb(`${WEB_URL}/api/bot_state.php?key=${encodeURIComponent(key)}`, {
       headers: { "X-Bot-Token": BOT_TOKEN! },
       signal: AbortSignal.timeout(10000),
     });
@@ -357,7 +386,7 @@ async function getBotState(key: string): Promise<string | null | undefined> {
 
 async function setBotState(key: string, value: string): Promise<boolean> {
   try {
-    const res = await fetch(`${WEB_URL}/api/bot_state.php`, {
+    const res = await fetchWeb(`${WEB_URL}/api/bot_state.php`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
       body: JSON.stringify({ key, value }),
@@ -586,7 +615,7 @@ interface EventPayload {
 
 async function logEvent(type: string, payload: EventPayload = {}): Promise<void> {
   try {
-    const res = await fetch(`${WEB_URL}/api/discord_events_record.php`, {
+    const res = await fetchWeb(`${WEB_URL}/api/discord_events_record.php`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
       body: JSON.stringify({ type, ...payload }),
@@ -614,7 +643,7 @@ async function refreshInviteCache(): Promise<void> {
 
 async function recordJoin(inviterDiscordId: string, invitedDiscordId: string, inviteCode: string): Promise<void> {
   try {
-    const res = await fetch(`${WEB_URL}/api/rewards_invites_record.php`, {
+    const res = await fetchWeb(`${WEB_URL}/api/rewards_invites_record.php`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -771,7 +800,7 @@ async function handleCkCommand(interaction: ChatInputCommandInteraction): Promis
   const reason = interaction.options.getString("motivo", true);
 
   try {
-    const res = await fetch(`${WEB_URL}/api/ck_record.php`, {
+    const res = await fetchWeb(`${WEB_URL}/api/ck_record.php`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
       body: JSON.stringify({
@@ -811,7 +840,7 @@ async function handleRegistrarStreamerCommand(interaction: ChatInputCommandInter
   const channelName = interaction.options.getString("canal", true);
 
   try {
-    const res = await fetch(`${WEB_URL}/api/streamer_register_from_discord.php`, {
+    const res = await fetchWeb(`${WEB_URL}/api/streamer_register_from_discord.php`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
       body: JSON.stringify({
@@ -853,7 +882,7 @@ async function handleRegistrarStreamerCommand(interaction: ChatInputCommandInter
 async function handleScriptInstalledButton(interaction: import("discord.js").ButtonInteraction): Promise<void> {
   const id = interaction.customId.slice("script_installed:".length);
   try {
-    const res = await fetch(`${WEB_URL}/api/scripts_pending_mark_installed_from_discord.php`, {
+    const res = await fetchWeb(`${WEB_URL}/api/scripts_pending_mark_installed_from_discord.php`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
       body: JSON.stringify({ id, markedByDiscordId: interaction.user.id }),
@@ -897,7 +926,7 @@ const SCHEDULED_MESSAGES_INTERVAL_MS = 60 * 1000;
 
 async function sendDueScheduledMessages(): Promise<void> {
   try {
-    const res = await fetch(`${WEB_URL}/api/scheduled_messages_due.php`, {
+    const res = await fetchWeb(`${WEB_URL}/api/scheduled_messages_due.php`, {
       headers: { "X-Bot-Token": BOT_TOKEN! },
       signal: AbortSignal.timeout(10000),
     });
@@ -1121,7 +1150,7 @@ client.on("messageCreate", async (message: Message) => {
   if (!message.content.trim()) return;
 
   try {
-    const res = await fetch(`${WEB_URL}/api/bug_report_from_discord.php`, {
+    const res = await fetchWeb(`${WEB_URL}/api/bug_report_from_discord.php`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
       body: JSON.stringify({
@@ -1167,7 +1196,7 @@ client.on("threadCreate", async (thread) => {
     const content = body ? `${thread.name}\n\n${body}` : thread.name;
     const member = await thread.guild.members.fetch(authorId).catch(() => null);
 
-    const res = await fetch(`${WEB_URL}/api/suggestion_from_discord.php`, {
+    const res = await fetchWeb(`${WEB_URL}/api/suggestion_from_discord.php`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
       body: JSON.stringify({
@@ -1281,7 +1310,7 @@ client.on("messageCreate", async (message: Message) => {
   }
 
   try {
-    const res = await fetch(`${WEB_URL}/api/discord_absence_record.php`, {
+    const res = await fetchWeb(`${WEB_URL}/api/discord_absence_record.php`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
       body: JSON.stringify({
