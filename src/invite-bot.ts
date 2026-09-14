@@ -82,8 +82,13 @@ const VERIFY_ROLE_ID = process.env.VERIFY_ROLE_ID ?? "1508918751918166291";
 const NO_WHITELIST_ROLE_ID = process.env.NO_WHITELIST_ROLE_ID ?? "1508923770277199942";
 const WATCHED_BOT_ID = process.env.WATCHED_BOT_ID ?? "1522364759767515368"; // "Old State 2000"
 const WATCHDOG_DM_ID = process.env.WATCHDOG_DM_ID ?? "761217833451257876";
-const BUG_REPORT_CHANNEL_ID = process.env.BUG_REPORT_CHANNEL_ID ?? "1508918753977434234";
-const SUGGESTION_CHANNEL_ID = process.env.SUGGESTION_CHANNEL_ID ?? "1522732946979553411";
+// Canal de reportes de bugs (mensajes normales) y canal de sugerencias
+// (FORO -- pedido por el usuario: cada publicación del foro es un hilo
+// nuevo, no un mensaje suelto, ver el listener de "threadCreate" más abajo).
+// IDs actualizados a los canales nuevos (los de antes se quedaron vacíos
+// tras la reorganización del Discord).
+const BUG_REPORT_CHANNEL_ID = process.env.BUG_REPORT_CHANNEL_ID ?? "1548670386374312098";
+const SUGGESTION_CHANNEL_ID = process.env.SUGGESTION_CHANNEL_ID ?? "1548670254132101220";
 // Canal donde vive el embed de "quién tiene cada rol" (ver ROSTER_ROLE_NAMES
 // más abajo) -- puede estar en cualquiera de los dos servidores, solo hace
 // falta que el bot esté invitado ahí con permiso para enviar/editar
@@ -552,6 +557,24 @@ const COMMANDS = [
     )
     .addStringOption((opt) => opt.setName("motivo").setDescription("Motivo del CK").setRequired(true))
     .toJSON(),
+  // Pedido por el usuario: "creame un comando para el bot que se llame
+  // registrar streamer". Da de alta al streamer en la web (misma acción
+  // que /panel/streamers) y le concede el rol de Streamer en Discord.
+  new SlashCommandBuilder()
+    .setName("registrar-streamer")
+    .setDescription("Da de alta a un streamer y le da el rol de Streamer")
+    .addUserOption((opt) => opt.setName("usuario").setDescription("Cuenta de Discord del streamer").setRequired(true))
+    .addStringOption((opt) =>
+      opt
+        .setName("plataforma")
+        .setDescription("Dónde emite")
+        .setRequired(true)
+        .addChoices({ name: "Twitch", value: "twitch" }, { name: "Kick", value: "kick" })
+    )
+    .addStringOption((opt) =>
+      opt.setName("canal").setDescription("Nombre del canal (sin URL completa)").setRequired(true)
+    )
+    .toJSON(),
 ];
 
 async function registerSlashCommands(): Promise<void> {
@@ -650,12 +673,56 @@ async function handleCkCommand(interaction: ChatInputCommandInteraction): Promis
   }
 }
 
+async function handleRegistrarStreamerCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  if (!interaction.guild || !interaction.member) return;
+  const invoker = interaction.member as GuildMember;
+  if (!isStaffMember(invoker)) {
+    await interaction.reply({ content: "No tienes permiso para usar este comando.", ephemeral: true });
+    return;
+  }
+
+  const targetUser = interaction.options.getUser("usuario", true);
+  const platform = interaction.options.getString("plataforma", true) as "twitch" | "kick";
+  const channelName = interaction.options.getString("canal", true);
+
+  try {
+    const res = await fetch(`${WEB_URL}/api/streamer_register_from_discord.php`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
+      body: JSON.stringify({
+        discordId: targetUser.id,
+        displayName: targetUser.username,
+        platform,
+        channelName,
+        registeredByDiscordId: invoker.id,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) {
+      log(`el panel rechazó el streamer registrado por ${invoker.id} sobre ${targetUser.id} (HTTP ${res.status})`);
+      await interaction.reply({ content: "No se pudo registrar el streamer en el panel.", ephemeral: true });
+      return;
+    }
+    const data = (await res.json().catch(() => ({}))) as { roleGranted?: boolean };
+    const roleNote = data.roleGranted === false ? " (no se le pudo dar el rol de Streamer en Discord)" : "";
+    await interaction.reply({
+      content: `${targetUser} registrado como streamer de **${platform === "twitch" ? "Twitch" : "Kick"}** (canal \`${channelName}\`)${roleNote}.`,
+      ephemeral: false,
+    });
+  } catch (err) {
+    log(`fallo en /registrar-streamer: ${(err as Error).message}`);
+    await interaction.reply({ content: "No se pudo completar la acción.", ephemeral: true });
+  }
+}
+
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName === "prioridad") {
     await handlePrioridadCommand(interaction);
   } else if (interaction.commandName === "ck") {
     await handleCkCommand(interaction);
+  } else if (interaction.commandName === "registrar-streamer") {
+    await handleRegistrarStreamerCommand(interaction);
   }
 });
 
@@ -906,31 +973,49 @@ client.on("messageCreate", async (message: Message) => {
   }
 });
 
-// ===== Sugerencias: cada mensaje en el canal se registra en la web =====
+// ===== Sugerencias: el canal es un FORO -- cada publicación nueva es un
+// hilo (thread) con un título propio, no un mensaje suelto en el canal.
+// Discord dispara "threadCreate" al abrirse el hilo; el texto del post en
+// sí es el "mensaje de arranque" del hilo (fetchStarterMessage()), que
+// puede tardar un instante en estar disponible justo al crearse. =====
 
-client.on("messageCreate", async (message: Message) => {
-  if (message.author.bot) return;
-  if (message.channelId !== SUGGESTION_CHANNEL_ID) return;
-  if (!message.content.trim()) return;
+client.on("threadCreate", async (thread) => {
+  if (thread.parentId !== SUGGESTION_CHANNEL_ID) return;
+  const authorId = thread.ownerId;
+  if (!authorId) return;
 
   try {
+    // El starter message no siempre está listo en el mismísimo evento de
+    // creación del hilo -- un par de reintentos cortos es más fiable que
+    // fallar directamente si sale null la primera vez.
+    let starter = null;
+    for (let i = 0; i < 3 && !starter; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 1000));
+      starter = await thread.fetchStarterMessage().catch(() => null);
+    }
+    if (starter?.author.bot) return;
+
+    const body = starter?.content?.trim() ?? "";
+    const content = body ? `${thread.name}\n\n${body}` : thread.name;
+    const member = await thread.guild.members.fetch(authorId).catch(() => null);
+
     const res = await fetch(`${WEB_URL}/api/suggestion_from_discord.php`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Bot-Token": BOT_TOKEN! },
       body: JSON.stringify({
-        discordId: message.author.id,
-        displayName: message.member?.displayName ?? message.author.username,
-        content: message.content,
+        discordId: authorId,
+        displayName: member?.displayName ?? thread.name,
+        content,
       }),
       signal: AbortSignal.timeout(10000),
     });
     if (res.ok) {
-      await message.react("💡");
+      await starter?.react("💡").catch(() => {});
     } else {
-      log(`el panel rechazó la sugerencia de ${message.author.id} (HTTP ${res.status})`);
+      log(`el panel rechazó la sugerencia del hilo ${thread.id} (HTTP ${res.status})`);
     }
   } catch (err) {
-    log(`no se pudo registrar la sugerencia de ${message.author.id}: ${(err as Error).message}`);
+    log(`no se pudo registrar la sugerencia del hilo ${thread.id}: ${(err as Error).message}`);
   }
 });
 
