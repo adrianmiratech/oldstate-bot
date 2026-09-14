@@ -774,6 +774,13 @@ const COMMANDS = [
     )
     .addStringOption((opt) => opt.setName("motivo").setDescription("Motivo de la sanción").setRequired(true))
     .toJSON(),
+  // Pedido por el usuario: "crea un comando... para que cada usuario pueda
+  // ver el tiempo que lleva en el servidor de fivem y sus puntos". Sin
+  // opciones -- cada quien consulta solo lo suyo, no hace falta ser staff.
+  new SlashCommandBuilder()
+    .setName("actividad")
+    .setDescription("Consulta tu tiempo jugado en el servidor y tus puntos de recompensa")
+    .toJSON(),
 ];
 
 async function registerSlashCommands(): Promise<void> {
@@ -959,6 +966,54 @@ async function handleRegistrarStreamerCommand(interaction: ChatInputCommandInter
   }
 }
 
+// Mismo cálculo que formatDuration() en el panel (UserDetailPanel.tsx) --
+// se mantiene igual aquí para que el número que ve alguien en Discord
+// coincida con el que vería en la web.
+function formatDuration(ms: number): string {
+  const totalMinutes = Math.floor(ms / 60000);
+  const days = Math.floor(totalMinutes / (60 * 24));
+  const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
+  const minutes = totalMinutes % 60;
+  if (days === 0 && hours === 0 && minutes === 0) return "0m";
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (days > 0 || hours > 0) parts.push(`${hours}h`);
+  parts.push(`${minutes}m`);
+  return parts.join(" ");
+}
+
+async function handleActividadCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  try {
+    const res = await fetchWeb(`${WEB_URL}/api/activity_from_discord.php?discordId=${interaction.user.id}`, {
+      headers: { "X-Bot-Token": BOT_TOKEN! },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) {
+      await interaction.reply({ content: "No se pudo consultar tu actividad en el panel.", ephemeral: true });
+      return;
+    }
+    const data = (await res.json()) as {
+      fivemMs: number;
+      loyaltyPoints: number;
+      isOnline: boolean;
+    };
+    const embed = new EmbedBuilder()
+      .setColor(0x3ef07f)
+      .setAuthor({ name: "OLD STATE RP", iconURL: LOGO_URL })
+      .setTitle("📊 Tu actividad")
+      .addFields(
+        { name: "⏱️ Tiempo en el servidor", value: formatDuration(data.fivemMs), inline: true },
+        { name: "⭐ Puntos de recompensa", value: String(data.loyaltyPoints), inline: true }
+      )
+      .setFooter({ text: data.isOnline ? "Conectado ahora mismo" : "No conectado ahora mismo" })
+      .setTimestamp();
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+  } catch (err) {
+    log(`fallo en /actividad para ${interaction.user.id}: ${describeFetchError(err)}`);
+    await interaction.reply({ content: `No se pudo completar la acción (${describeFetchError(err)}).`, ephemeral: true });
+  }
+}
+
 // Pedido por el usuario: "en scripts pendientes... añade un boton al
 // mensaje que sea marcar como instalado y asi que se actualice el estado
 // automaticamente". El botón viaja en el propio DM que ya manda
@@ -1003,6 +1058,8 @@ client.on("interactionCreate", async (interaction) => {
     await handleRegistrarStreamerCommand(interaction);
   } else if (interaction.commandName === "sancionar") {
     await handleSancionarCommand(interaction);
+  } else if (interaction.commandName === "actividad") {
+    await handleActividadCommand(interaction);
   }
 });
 
