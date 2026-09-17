@@ -62,6 +62,7 @@ import {
   Routes,
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
+  type GuildBan,
   type GuildMember,
   type Invite,
   type Message,
@@ -113,6 +114,21 @@ const ROSTER_LOGO_URL = process.env.ROSTER_LOGO_URL ?? "https://oldstate.sub-yor
 // Azul de marca del logo de staff (distinto del BRAND_COLOR naranja
 // general, para que el roster se distinga a simple vista).
 const ROSTER_COLOR = 0x1e3fae;
+
+// Servidor propio de las bandas/organizaciones ilegales -- pedido por el
+// usuario: "gestioname un roster separado por grupo de ilegales" +
+// "en las categorias de cada grupo hay un canal que se llama roles, envia
+// hay un roster por grupo". Cada categoría del servidor es una banda; si
+// tiene un canal de texto llamado "roles" Y existe un rol con el mismo
+// nombre que la categoría, ahí se mantiene un embed editado (nunca
+// reenviado) con quién tiene ese rol -- ver updateIlegalesGroupRosters().
+const ILEGALES_GUILD_ID = process.env.ILEGALES_GUILD_ID ?? "1510727630343635005";
+const ILEGALES_ROSTER_CHANNEL_NAME = "roles";
+const ILEGALES_ROSTER_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+
+// Canal donde cualquier mensaje recibe una reacción de corazón rojo --
+// pedido por el usuario, sin ninguna otra lógica asociada.
+const HEART_REACT_CHANNEL_ID = process.env.HEART_REACT_CHANNEL_ID ?? "1508918752669073614";
 
 // Roles reales de "Cola Prioritaria LVL 1/2/3" -- otorgados por el comando
 // /prioridad (los permisos del panel se leen de estos mismos roles, así
@@ -591,6 +607,90 @@ async function updateRosterMessage(): Promise<void> {
     if (rosterUpdateQueued) {
       rosterUpdateQueued = false;
       updateRosterMessage();
+    }
+  }
+}
+
+let ilegalesRosterUpdateQueued = false;
+let ilegalesRosterUpdateRunning = false;
+
+/**
+ * Roster de bandas del servidor de ilegales -- una categoría por banda, con
+ * un canal de texto "roles" dentro donde se mantiene un único embed editado
+ * (mismo patrón "editar si existe, nunca reenviar" que updateRosterMessage())
+ * listando a quien tenga el rol con el mismo nombre que la categoría. Una
+ * categoría sin canal "roles", o sin un rol homónimo en el servidor, se
+ * omite sin más (se deja constancia en el log para revisar a mano).
+ */
+async function updateIlegalesGroupRosters(): Promise<void> {
+  if (!ILEGALES_GUILD_ID) return;
+  if (ilegalesRosterUpdateRunning) {
+    ilegalesRosterUpdateQueued = true;
+    return;
+  }
+  ilegalesRosterUpdateRunning = true;
+
+  try {
+    const guild = await client.guilds.fetch(ILEGALES_GUILD_ID);
+    await guild.channels.fetch();
+    await guild.roles.fetch();
+    await guild.members.fetch();
+
+    const categories = guild.channels.cache.filter((c) => c.type === ChannelType.GuildCategory);
+
+    for (const category of categories.values()) {
+      const rolesChannel = guild.channels.cache.find(
+        (c) =>
+          c.parentId === category.id &&
+          c.type === ChannelType.GuildText &&
+          c.name.toLowerCase().trim() === ILEGALES_ROSTER_CHANNEL_NAME
+      );
+      if (!rolesChannel || !rolesChannel.isTextBased()) continue;
+
+      const groupName = category.name.toLowerCase().trim();
+      const groupRole = guild.roles.cache.find((r) => r.name.toLowerCase().trim() === groupName);
+      if (!groupRole) {
+        log(`roster de ilegales: la categoría "${category.name}" no tiene un rol con el mismo nombre -- se omite.`);
+        continue;
+      }
+
+      const memberIds = [...groupRole.members.keys()];
+      const embed = new EmbedBuilder()
+        .setColor(BRAND_COLOR)
+        .setTitle(`📋 Roster — ${category.name}`)
+        .setDescription(memberIds.length > 0 ? memberIds.map((id) => `<@${id}>`).join("\n") : "*Nadie con este rol todavía.*")
+        .setFooter({ text: "Última actualización" })
+        .setTimestamp();
+
+      const stateKey = `ilegales_roster_${rolesChannel.id}`;
+      const existingId = await getBotState(stateKey);
+      if (existingId === undefined) {
+        log(`roster de ilegales: no se pudo comprobar el mensaje existente en #${rolesChannel.name} (${category.name}) -- se omite este ciclo.`);
+        continue;
+      }
+      if (existingId) {
+        try {
+          const existing = await rolesChannel.messages.fetch(existingId);
+          await existing.edit({ embeds: [embed] });
+        } catch (err) {
+          log(`roster de ilegales: el mensaje guardado (${existingId}) en #${rolesChannel.name} ya no se puede editar (${(err as Error).message}) -- no se crea uno nuevo automáticamente, hace falta revisarlo a mano.`);
+        }
+        continue;
+      }
+
+      const sent = await rolesChannel.send({ embeds: [embed] });
+      const saved = await setBotState(stateKey, sent.id);
+      if (!saved) {
+        log(`roster de ilegales: aviso, el mensaje ${sent.id} en #${rolesChannel.name} se envió pero no se pudo guardar su ID -- revísalo a mano para que no se duplique en el futuro.`);
+      }
+    }
+  } catch (err) {
+    log(`no se pudo actualizar el roster de ilegales: ${(err as Error).message}`);
+  } finally {
+    ilegalesRosterUpdateRunning = false;
+    if (ilegalesRosterUpdateQueued) {
+      ilegalesRosterUpdateQueued = false;
+      updateIlegalesGroupRosters();
     }
   }
 }
@@ -1114,6 +1214,10 @@ client.once("clientReady", async () => {
     // evento de rol se pierde o el bot estuvo caído un momento.
     setInterval(updateRosterMessage, ROSTER_SYNC_INTERVAL_MS);
   }
+  if (ILEGALES_GUILD_ID) {
+    await updateIlegalesGroupRosters();
+    setInterval(updateIlegalesGroupRosters, ILEGALES_ROSTER_SYNC_INTERVAL_MS);
+  }
   setInterval(sendDueScheduledMessages, SCHEDULED_MESSAGES_INTERVAL_MS);
   if (SERVER_STATUS_CHANNEL_ID) {
     await updateServerStatusMessage();
@@ -1187,6 +1291,14 @@ client.on("guildMemberRemove", (member: GuildMember | PartialGuildMember) => {
   }
 });
 
+// Roster de bandas de ilegales: alguien que se va podía tener un rol de
+// banda -- se refresca sin comprobar cuál tenía (los grupos se recalculan
+// todos juntos, es barato comparado con el roster de staff).
+client.on("guildMemberRemove", (member: GuildMember | PartialGuildMember) => {
+  if (member.guild.id !== ILEGALES_GUILD_ID) return;
+  updateIlegalesGroupRosters();
+});
+
 client.on("guildMemberUpdate", (oldMember: GuildMember | PartialGuildMember, newMember: GuildMember) => {
   if (newMember.guild.id !== GUILD_ID) return;
 
@@ -1229,6 +1341,17 @@ client.on("guildMemberUpdate", (oldMember: GuildMember | PartialGuildMember, new
   );
   if (rosterRoleChanged) {
     updateRosterMessage();
+  }
+});
+
+// Roster de bandas de ilegales: cualquier cambio de rol en ese servidor
+// puede afectar a cuál de los grupos configurados en categorías -- se
+// recalculan todos (updateIlegalesGroupRosters() ya evita solaparse).
+client.on("guildMemberUpdate", (oldMember: GuildMember | PartialGuildMember, newMember: GuildMember) => {
+  if (newMember.guild.id !== ILEGALES_GUILD_ID) return;
+  const oldRoles = oldMember.roles?.cache ?? new Collection();
+  if (newMember.roles.cache.size !== oldRoles.size || [...newMember.roles.cache.keys()].some((id) => !oldRoles.has(id))) {
+    updateIlegalesGroupRosters();
   }
 });
 
@@ -1319,6 +1442,34 @@ client.on("messageCreate", async (message: Message) => {
     }
   } catch (err) {
     log(`no se pudo crear el bug reportado por ${message.author.id}: ${(err as Error).message}`);
+  }
+});
+
+// ===== Canal de corazones: cualquier mensaje recibe una reacción ❤️ =====
+
+client.on("messageCreate", async (message: Message) => {
+  if (message.channelId !== HEART_REACT_CHANNEL_ID) return;
+  try {
+    await message.react("❤️");
+  } catch (err) {
+    log(`no se pudo reaccionar con ❤️ al mensaje de ${message.author.id} en ${HEART_REACT_CHANNEL_ID}: ${(err as Error).message}`);
+  }
+});
+
+// ===== Ban global: quien se banea del servidor principal, se banea de
+// todos los demás servidores donde esté el bot -- pedido por el usuario. =====
+
+client.on("guildBanAdd", async (ban: GuildBan) => {
+  if (ban.guild.id !== GUILD_ID) return;
+  const reason = `Sincronizado: baneado en el servidor principal de OLD STATE${ban.reason ? ` (${ban.reason})` : ""}.`;
+  for (const [guildId, guild] of client.guilds.cache) {
+    if (guildId === GUILD_ID) continue;
+    try {
+      await guild.bans.create(ban.user.id, { reason });
+      log(`ban global: ${ban.user.id} baneado también en "${guild.name}" (${guildId}).`);
+    } catch (err) {
+      log(`ban global: no se pudo banear a ${ban.user.id} en "${guild.name}" (${guildId}): ${(err as Error).message}`);
+    }
   }
 });
 
